@@ -37,6 +37,7 @@ const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not availabl
 struct AgentRoleOverrides {
     developer_instructions: Option<String>,
     model: Option<String>,
+    model_provider: Option<String>,
     model_reasoning_effort: Option<ReasoningEffort>,
     model_reasoning_summary: Option<ReasoningSummary>,
     model_verbosity: Option<Verbosity>,
@@ -80,6 +81,7 @@ async fn apply_role_to_config_inner(
     let mut overrides = AgentRoleOverrides {
         developer_instructions: role_config.developer_instructions,
         model: role_config.model,
+        model_provider: role_config.model_provider,
         model_reasoning_effort: role_config.model_reasoning_effort,
         model_reasoning_summary: role_config.model_reasoning_summary,
         model_verbosity: role_config.model_verbosity,
@@ -181,6 +183,15 @@ mod role_overrides {
         overrides: &AgentRoleOverrides,
     ) -> anyhow::Result<Config> {
         let mut next_config = config.clone();
+        if let Some(provider_id) = &overrides.model_provider {
+            // A role may select a configured provider, but cannot introduce endpoints or auth.
+            next_config.model_provider = config
+                .model_providers
+                .get(provider_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("Model provider `{provider_id}` not found"))?;
+            next_config.model_provider_id = provider_id.clone();
+        }
         next_config.config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
         if let Some(model) = &overrides.model {
             next_config.model = Some(model.clone());

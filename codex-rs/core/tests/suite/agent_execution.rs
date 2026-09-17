@@ -58,17 +58,20 @@ async fn mount_root_collaboration_call(
     arguments: serde_json::Value,
 ) {
     let response_id = format!("resp-{call_id}");
+    let mut tool_call = ev_function_call_with_namespace(
+        call_id,
+        MULTI_AGENT_V2_NAMESPACE,
+        tool_name,
+        &arguments.to_string(),
+    );
+    // This fixture supplies literal task text, not an encrypted OpenAI handoff.
+    tool_call["item"]["encrypted_function_args"] = json!([]);
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| body_contains(request, prompt),
         sse(vec![
             ev_response_created(&response_id),
-            ev_function_call_with_namespace(
-                call_id,
-                MULTI_AGENT_V2_NAMESPACE,
-                tool_name,
-                &arguments.to_string(),
-            ),
+            tool_call,
             ev_completed(&response_id),
         ]),
     )
@@ -508,5 +511,134 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     let reloaded_tools = worker_tools(&reloaded_worker_request);
     assert!(reloaded_tools.to_string().contains("### `exec_command`"));
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
+    let wire_api = codex_model_provider_info::WireApi::Responses;
+    let parent_server = start_mock_server().await;
+    let child_server = start_mock_server().await;
+    let role_home = tempfile::tempdir()?;
+    let role_path = role_home.path().join("external.toml");
+    std::fs::write(
+        &role_path,
+        "model = 'external-model'\nmodel_provider = 'external'\nmodel_reasoning_effort = 'high'\n",
+    )?;
+    mount_root_collaboration_call(
+        &parent_server,
+        FIRST_PROMPT,
+        "external-spawn",
+        "spawn_agent",
+        json!({ "task_name": "external", "agent_type": "external", "message": FIRST_TASK, "fork_turns": "none" }),
+    )
+    .await;
+
+    core_test_support::responses::mount_sse_sequence(
+        &child_server,
+        vec![
+            sse(vec![
+                ev_assistant_message("first", "first child result"),
+                ev_completed("first"),
+            ]),
+            sse(vec![
+                ev_assistant_message("second", "second child result"),
+                ev_completed("second"),
+            ]),
+        ],
+    )
+    .await;
+
+    let child_url = format!("{}/v1", child_server.uri());
+    let mut builder = test_codex()
+        .with_auth(codex_login::CodexAuth::from_api_key("parent-test-key"))
+        .with_model("gpt-5.6-sol")
+        .with_config(move |config| {
+            for feature in [Feature::Collab, Feature::MultiAgentV2] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable collaboration");
+            }
+            let mut provider = config.model_providers["ollama"].clone();
+            provider.base_url = Some(child_url.clone());
+            provider.wire_api = wire_api;
+            provider.experimental_bearer_token = Some("child-test-key".to_string().into());
+            config
+                .model_providers
+                .insert("external".to_string(), provider);
+            config.agent_roles.insert(
+                "external".to_string(),
+                codex_core::config::AgentRoleConfig {
+                    description: Some("External provider worker".to_string()),
+                    config_file: Some(role_path.clone()),
+                    nickname_candidates: None,
+                },
+            );
+        });
+    let test = builder.build_with_auto_env(&parent_server).await?;
+    test.submit_turn(FIRST_PROMPT).await?;
+    let child_id = test
+        .thread_manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|id| *id != test.session_configured.thread_id)
+        .expect("a child must have started");
+    let child = test.thread_manager.get_thread(child_id).await?;
+    wait_for_event(&child, |event| match event {
+        EventMsg::Error(error) => panic!("child provider failed: {error:?}"),
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    mount_root_collaboration_call(
+        &parent_server,
+        "continue external worker",
+        "external-followup",
+        "followup_task",
+        json!({ "target": "external", "message": SECOND_TASK }),
+    )
+    .await;
+    test.submit_turn("continue external worker").await?;
+    wait_for_event(&child, |event| match event {
+        EventMsg::Error(error) => panic!("child provider failed: {error:?}"),
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+    let requests = child_server
+        .received_requests()
+        .await
+        .expect("child requests")
+        .into_iter()
+        .filter(|request| request.method == "POST")
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer child-test-key")
+        );
+        let body: serde_json::Value = request.body_json()?;
+        assert_eq!(body["model"], "external-model");
+    }
+    assert!(
+        requests[1]
+            .body_json::<serde_json::Value>()?
+            .to_string()
+            .contains(SECOND_TASK)
+    );
+    assert_eq!(test.thread_manager.list_thread_ids().await.len(), 2);
+    let snapshot = child.config_snapshot().await;
+    assert_eq!(snapshot.model_provider_id, "external");
+    assert_eq!(
+        snapshot.reasoning_effort,
+        Some(codex_protocol::openai_models::ReasoningEffort::High)
+    );
     Ok(())
 }
