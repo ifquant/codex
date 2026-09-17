@@ -514,9 +514,12 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     Ok(())
 }
 
+#[test_case::test_case(codex_model_provider_info::WireApi::Responses; "responses")]
+#[test_case::test_case(codex_model_provider_info::WireApi::CodebuddyChat; "codebuddy_chat")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
-    let wire_api = codex_model_provider_info::WireApi::Responses;
+async fn v2_role_provider_keeps_its_credentials_on_followup(
+    wire_api: codex_model_provider_info::WireApi,
+) -> Result<()> {
     let parent_server = start_mock_server().await;
     let child_server = start_mock_server().await;
     let role_home = tempfile::tempdir()?;
@@ -533,22 +536,34 @@ async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
         json!({ "task_name": "external", "agent_type": "external", "message": FIRST_TASK, "fork_turns": "none" }),
     )
     .await;
-
-    core_test_support::responses::mount_sse_sequence(
-        &child_server,
-        vec![
-            sse(vec![
-                ev_assistant_message("first", "first child result"),
-                ev_completed("first"),
-            ]),
-            sse(vec![
-                ev_assistant_message("second", "second child result"),
-                ev_completed("second"),
-            ]),
-        ],
-    )
-    .await;
-
+    if wire_api == codex_model_provider_info::WireApi::Responses {
+        core_test_support::responses::mount_sse_sequence(
+            &child_server,
+            vec![
+                sse(vec![
+                    ev_assistant_message("first", "first child result"),
+                    ev_completed("first"),
+                ]),
+                sse(vec![
+                    ev_assistant_message("second", "second child result"),
+                    ev_completed("second"),
+                ]),
+            ],
+        )
+        .await;
+    }
+    if wire_api == codex_model_provider_info::WireApi::CodebuddyChat {
+        let chunk = json!({"id":"chat-child","model":"external-model","choices":[{"index":0,"delta":{"content":"child result"},"finish_reason":"stop"}]});
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: [DONE]\n\n")),
+            )
+            .mount(&child_server)
+            .await;
+    }
     let child_url = format!("{}/v1", child_server.uri());
     let mut builder = test_codex()
         .with_auth(codex_login::CodexAuth::from_api_key("parent-test-key"))
@@ -571,7 +586,7 @@ async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
                 "external".to_string(),
                 codex_core::config::AgentRoleConfig {
                     description: Some("External provider worker".to_string()),
-                    config_file: Some(role_path.clone()),
+                    config_file: Some(role_path),
                     nickname_candidates: None,
                 },
             );
@@ -626,7 +641,11 @@ async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
         );
         let body: serde_json::Value = request.body_json()?;
         assert_eq!(body["model"], "external-model");
-        let inputs = &body["input"];
+        let inputs = if wire_api == codex_model_provider_info::WireApi::CodebuddyChat {
+            &body["messages"]
+        } else {
+            &body["input"]
+        };
         assert!(
             inputs
                 .as_array()
@@ -644,6 +663,11 @@ async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
                 .iter()
                 .any(|item| item["type"] == "agent_message")
         );
+        if wire_api == codex_model_provider_info::WireApi::CodebuddyChat {
+            assert_eq!(request.url.path(), "/v1/chat/completions");
+            assert_eq!(body["reasoning_effort"], "high");
+            assert_eq!(body["thinking"], json!({"type":"enabled"}));
+        }
     }
     assert!(
         requests[1]

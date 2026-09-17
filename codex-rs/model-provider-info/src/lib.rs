@@ -69,12 +69,16 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// CodeBuddy Chat Completions with DeepSeek thinking and function tools.
+    #[serde(rename = "codebuddy_chat")]
+    CodebuddyChat,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::CodebuddyChat => "codebuddy_chat",
         };
         f.write_str(value)
     }
@@ -88,8 +92,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "codebuddy_chat" => Ok(Self::CodebuddyChat),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "codebuddy_chat"],
+            )),
         }
     }
 }

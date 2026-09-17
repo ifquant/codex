@@ -160,6 +160,7 @@ fn model_provider_from_proto(
     let id = provider.id;
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
+        Ok(proto::WireApi::CodebuddyChat) => WireApi::CodebuddyChat,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -305,6 +306,7 @@ fn proto_string_map(values: HashMap<String, RedactedString>) -> proto::StringMap
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::CodebuddyChat => proto::WireApi::CodebuddyChat,
     }
 }
 
@@ -435,15 +437,18 @@ mod tests {
 
     #[test]
     fn model_provider_proto_roundtrips_through_domain_type() {
-        let mut expected = expected_provider();
-        expected.auth = None;
-        expected.experimental_bearer_token = Some("synthetic-provider-token".into());
-        let proto = model_provider_to_proto("local", expected.clone());
-        assert!(proto.supports_standalone_web_search);
-        let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
+        for wire_api in [WireApi::Responses, WireApi::CodebuddyChat] {
+            let mut expected = expected_provider();
+            expected.wire_api = wire_api;
+            expected.auth = None;
+            expected.experimental_bearer_token = Some("synthetic-provider-token".into());
+            let proto = model_provider_to_proto("local", expected.clone());
+            assert!(proto.supports_standalone_web_search);
+            let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
 
-        assert_eq!(id, "local");
-        assert_eq!(actual, expected);
+            assert_eq!(id, "local");
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

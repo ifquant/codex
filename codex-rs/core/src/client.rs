@@ -939,7 +939,8 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
-        if !self.state.provider.info().supports_websockets
+        if self.state.provider.info().wire_api != WireApi::Responses
+            || !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -977,6 +978,9 @@ impl ModelClient {
     }
 
     fn responses_endpoint(&self, auth: Option<&CodexAuth>, model: &str) -> ResponsesEndpoint {
+        if self.state.provider.info().wire_api == WireApi::CodebuddyChat {
+            return ResponsesEndpoint::CodebuddyChat;
+        }
         if self.free_guardian_enabled
             && crate::guardian::is_basic_session_source(&self.state.session_source)
             && self.uses_codex_backend(auth)
@@ -1986,7 +1990,7 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
-            WireApi::Responses => {
+            WireApi::Responses | WireApi::CodebuddyChat => {
                 if self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
                     match self

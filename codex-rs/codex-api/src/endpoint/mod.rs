@@ -1,3 +1,5 @@
+mod codebuddy_chat;
+mod codebuddy_chat_stream;
 pub(crate) mod images;
 pub(crate) mod memories;
 pub(crate) mod models;

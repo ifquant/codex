@@ -5985,6 +5985,13 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "CodeBuddy Chat Completions with DeepSeek thinking and function tools.",
+          "enum": [
+            "codebuddy_chat"
+          ],
+          "type": "string"
         }
       ]
     },

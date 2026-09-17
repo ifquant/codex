@@ -33,6 +33,8 @@ pub enum ResponsesEndpoint {
     Guardian,
     /// Lightweight asynchronous Guardian risk classification.
     GuardianClassifier,
+    /// CodeBuddy Chat Completions, adapted to the internal Responses event contract.
+    CodebuddyChat,
 }
 
 impl ResponsesEndpoint {
@@ -42,6 +44,7 @@ impl ResponsesEndpoint {
             Self::Responses => "/responses",
             Self::Guardian => "/guardian",
             Self::GuardianClassifier => "/guardian-classifier",
+            Self::CodebuddyChat => "/chat/completions",
         }
     }
 }
@@ -112,9 +115,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
             compression,
             turn_state,
         } = options;
-        let body = EncodedJsonBody::encode(&request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
-
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
             insert_header(&mut headers, "x-client-request-id", thread_id);
@@ -123,6 +123,20 @@ impl<T: HttpTransport> ResponsesClient<T> {
         if let Some(subagent) = subagent_header(&session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
+
+        if self.endpoint == ResponsesEndpoint::CodebuddyChat {
+            return super::codebuddy_chat::stream(
+                &self.session,
+                serde_json::to_value(request).map_err(|e| ApiError::InvalidRequest {
+                    message: e.to_string(),
+                })?,
+                headers,
+                self.sse_telemetry.clone(),
+            )
+            .await;
+        }
+        let body = EncodedJsonBody::encode(&request)
+            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
         self.stream_encoded(body, headers, compression, turn_state)
             .await
@@ -146,6 +160,15 @@ impl<T: HttpTransport> ResponsesClient<T> {
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
+        if self.endpoint == ResponsesEndpoint::CodebuddyChat {
+            return super::codebuddy_chat::stream(
+                &self.session,
+                body,
+                extra_headers,
+                self.sse_telemetry.clone(),
+            )
+            .await;
+        }
         let body = EncodedJsonBody::encode(&body)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
         self.stream_encoded(body, extra_headers, compression, turn_state)

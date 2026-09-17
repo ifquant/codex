@@ -351,6 +351,16 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
+        if self.info.wire_api == codex_model_provider_info::WireApi::CodebuddyChat {
+            return ProviderCapabilities {
+                namespace_tools: true,
+                image_generation: false,
+                web_search: false,
+                external_web_access: false,
+                remote_compaction: RemoteCompactionSupport::Unsupported,
+            };
+        }
+
         let remote_compaction = if self.info.is_openai()
             || is_azure_responses_provider(&self.info.name, self.info.base_url.as_deref())
         {
