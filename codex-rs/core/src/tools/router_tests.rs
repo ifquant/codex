@@ -45,6 +45,42 @@ use super::tool_log_payload;
 struct ExtensionEchoContributor;
 
 #[test]
+fn plaintext_messages_use_the_configured_agent_namespace() {
+    for name in ["spawn_agent", "send_message", "followup_task"] {
+        let mut call = ToolCall {
+            tool_name: ToolName::namespaced("external_agents", name),
+            call_id: "call-message".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: Some(Vec::new()),
+        };
+        assert_eq!(
+            call.direct_source(Some("external_agents"), /*encrypt_messages*/ false),
+            ToolCallSource::DirectPlaintextMessage
+        );
+        assert_eq!(
+            call.direct_source(Some("collaboration"), /*encrypt_messages*/ true),
+            ToolCallSource::Direct
+        );
+        call.encrypted_function_args = Some(vec!["message".to_string()]);
+        assert_eq!(
+            call.direct_source(Some("external_agents"), /*encrypt_messages*/ false),
+            ToolCallSource::Direct
+        );
+        call.encrypted_function_args = None;
+        assert_eq!(
+            call.direct_source(Some("external_agents"), /*encrypt_messages*/ true),
+            ToolCallSource::Direct
+        );
+        assert_eq!(
+            call.direct_source(Some("external_agents"), /*encrypt_messages*/ false),
+            ToolCallSource::DirectPlaintextMessage
+        );
+    }
+}
+
+#[test]
 fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     let payload = ToolPayload::Function {
         arguments: json!({"target": "/root/worker", "message": "secret message"}).to_string(),
@@ -228,7 +264,10 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
     );
     assert_eq!(call.call_id, "call-namespace");
     assert_eq!(call.encrypted_function_args, Some(Vec::new()));
-    assert_eq!(call.direct_source(), ToolCallSource::Direct);
+    assert_eq!(
+        call.direct_source(Some("collaboration"), /*encrypt_messages*/ true),
+        ToolCallSource::Direct
+    );
     match call.payload {
         ToolPayload::Function { arguments } => {
             assert_eq!(arguments, "{}");

@@ -248,6 +248,10 @@ where
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MultiAgentV2ConfigToml {
+    /// Encrypt agent message arguments. Disable for plaintext cross-provider handoffs.
+    /// Defaults to true; plaintext tools should use a non-reserved tool namespace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_messages: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

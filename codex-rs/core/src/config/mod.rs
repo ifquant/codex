@@ -1283,6 +1283,7 @@ impl Default for CurrentTimeReminderConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MultiAgentV2Config {
+    pub encrypt_messages: bool,
     pub max_concurrent_threads_per_session: usize,
     pub min_wait_timeout_ms: i64,
     pub max_wait_timeout_ms: i64,
@@ -1302,6 +1303,7 @@ pub struct MultiAgentV2Config {
 impl MultiAgentV2Config {
     fn defaults_for_max_concurrency(max_concurrent_threads_per_session: usize) -> Self {
         Self {
+            encrypt_messages: true,
             max_concurrent_threads_per_session,
             min_wait_timeout_ms: DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS,
             max_wait_timeout_ms: DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS,
@@ -2770,6 +2772,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .unwrap_or(default.non_code_mode_only);
 
     MultiAgentV2Config {
+        encrypt_messages: base
+            .and_then(|config| config.encrypt_messages)
+            .unwrap_or(true),
         max_concurrent_threads_per_session,
         min_wait_timeout_ms,
         max_wait_timeout_ms,

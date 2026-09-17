@@ -77,7 +77,19 @@ impl ToolCallRuntime {
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
         let error_call = call.clone();
-        let source = call.direct_source();
+        let source = call.direct_source(
+            self.step_context
+                .turn
+                .config
+                .multi_agent_v2
+                .tool_namespace
+                .as_deref(),
+            self.step_context
+                .turn
+                .config
+                .multi_agent_v2
+                .encrypt_messages,
+        );
         let future = self.handle_tool_call_with_source(call, source, cancellation_token);
         async move {
             match future.await {

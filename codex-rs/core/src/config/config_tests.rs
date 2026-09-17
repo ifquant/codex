@@ -11590,6 +11590,7 @@ async fn multi_agent_v2_config_from_feature_table() -> std::io::Result<()> {
         codex_home.path().join(CONFIG_TOML_FILE),
         r#"[features.multi_agent_v2]
 enabled = true
+encrypt_messages = false
 max_concurrent_threads_per_session = 5
 min_wait_timeout_ms = 2500
 max_wait_timeout_ms = 120000
@@ -11617,6 +11618,7 @@ max_concurrent_threads_per_session = 9
         .await?;
 
     assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert!(!config.multi_agent_v2.encrypt_messages);
     assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 5);
     assert_eq!(config.multi_agent_v2.min_wait_timeout_ms, 2500);
     assert_eq!(config.multi_agent_v2.max_wait_timeout_ms, 120000);

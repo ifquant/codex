@@ -626,6 +626,24 @@ async fn v2_role_provider_keeps_its_credentials_on_followup() -> Result<()> {
         );
         let body: serde_json::Value = request.body_json()?;
         assert_eq!(body["model"], "external-model");
+        let inputs = &body["input"];
+        assert!(
+            inputs
+                .as_array()
+                .expect("child input must be an array")
+                .iter()
+                .any(|item| {
+                    item["role"] == "user" && item["content"].to_string().contains(FIRST_TASK)
+                }),
+            "child must receive its task as a standard user message"
+        );
+        assert!(
+            !inputs
+                .as_array()
+                .expect("child input must be an array")
+                .iter()
+                .any(|item| item["type"] == "agent_message")
+        );
     }
     assert!(
         requests[1]

@@ -832,6 +832,21 @@ impl ModelClient {
         };
         if !is_openai {
             for item in &mut input {
+                // AgentMessage is a Codex-specific wire item. Other Responses providers
+                // need the task as an ordinary message, not an item they may ignore.
+                if let ResponseItem::AgentMessage { content, .. } = item {
+                    let text = codex_protocol::models::plaintext_agent_message_content(content)
+                        .ok_or_else(|| CodexErr::Fatal(
+                            "Encrypted agent messages cannot cross providers; start with a plaintext task".to_string(),
+                        ))?;
+                    *item = ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![codex_protocol::models::ContentItem::InputText { text }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                }
                 item.clear_internal_chat_message_metadata_passthrough();
                 if let ResponseItem::FunctionCall {
                     encrypted_function_args,

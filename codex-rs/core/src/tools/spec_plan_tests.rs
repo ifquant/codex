@@ -2809,7 +2809,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_message_schemas_are_encrypted_by_default() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -2836,6 +2836,41 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
                 .get("message")
                 .and_then(|schema| schema.encrypted),
             Some(true)
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_message_schemas_are_plaintext() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        Arc::make_mut(&mut turn.config)
+            .multi_agent_v2
+            .encrypt_messages = false;
+    })
+    .await;
+    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
+        panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
+    };
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == tool_name
+            )
+        }) else {
+            panic!("expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace");
+        };
+        let properties = tool
+            .parameters
+            .properties
+            .as_ref()
+            .expect("tool should use object params");
+        assert_eq!(
+            properties
+                .get("message")
+                .and_then(|schema| schema.encrypted),
+            None
         );
     }
 }

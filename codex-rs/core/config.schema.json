@@ -2450,6 +2450,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "encrypt_messages": {
+          "description": "Encrypt agent message arguments. Disable for plaintext cross-provider handoffs. Defaults to true; plaintext tools should use a non-reserved tool namespace.",
+          "type": "boolean"
+        },
         "expose_spawn_agent_model_overrides": {
           "description": "Exposes `model` and `reasoning_effort` on the multi-agent v2 spawn tool and adds corresponding guidance to root and subagent usage hints.",
           "type": "boolean"
