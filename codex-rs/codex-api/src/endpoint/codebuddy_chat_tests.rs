@@ -37,19 +37,7 @@ async fn streams_parallel_tools_and_replays_reasoning_and_custom_input() {
     let (body, tools) = encode(request()).unwrap();
     assert_eq!(
         body["messages"][0],
-        json!({"role":"system","content":"You are a coding assistant. Follow the user's request and use available tools when needed."})
-    );
-    assert!(
-        body["messages"][1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Be concise.")
-    );
-    assert!(
-        body["messages"][1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("<codex-instructions>")
+        json!({"role":"system","content":"Be concise."})
     );
     assert_eq!(body["reasoning_effort"], "high");
     assert_eq!(body["thinking"], json!({"type":"enabled"}));
@@ -115,12 +103,7 @@ async fn streams_parallel_tools_and_replays_reasoning_and_custom_input() {
         body["messages"][3],
         json!({"role":"tool","tool_call_id":"patch","content":"Done"})
     );
-    assert!(
-        body["messages"][4]["content"]
-            .as_str()
-            .unwrap()
-            .ends_with("continue")
-    );
+    assert_eq!(body["messages"][4]["content"], "continue");
 }
 
 #[test]
@@ -241,11 +224,8 @@ fn long_tool_names_roundtrip_without_becoming_executable_from_history() {
     let alias = body["tools"][0]["function"]["name"].as_str().unwrap();
     assert!(alias.len() <= 64);
     assert_eq!(tools[alias].name, long_name);
-    let assistant = body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["role"] == "assistant")
-        .unwrap();
-    assert_eq!(assistant["tool_calls"][0]["function"]["name"], alias);
+    assert_eq!(
+        body["messages"][1]["tool_calls"][0]["function"]["name"],
+        alias
+    );
 }
