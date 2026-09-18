@@ -125,16 +125,27 @@ async fn handle_spawn_agent(
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
+    let apply_role = !is_full_history_fork || role_name.is_some();
     apply_requested_spawn_agent_model_overrides(
         &session,
         turn.as_ref(),
         &mut config,
         args.model.as_deref(),
-        args.reasoning_effort.clone(),
+        if apply_role {
+            None
+        } else {
+            args.reasoning_effort.clone()
+        },
     )
     .await?;
-    if !is_full_history_fork || role_name.is_some() {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+    if apply_role {
+        apply_spawn_agent_role(
+            &session,
+            &mut config,
+            role_name,
+            args.reasoning_effort.clone(),
+        )
+        .await?;
         if is_full_history_fork && config.developer_instructions.is_none() {
             config
                 .developer_instructions

@@ -94,16 +94,27 @@ async fn handle_spawn_agent(
     if args.fork_context {
         reject_full_fork_agent_type_override(role_name)?;
     }
+    let apply_role = !args.fork_context;
     apply_requested_spawn_agent_model_overrides(
         &session,
         turn.as_ref(),
         &mut config,
         args.model.as_deref(),
-        args.reasoning_effort.clone(),
+        if apply_role {
+            None
+        } else {
+            args.reasoning_effort.clone()
+        },
     )
     .await?;
-    if !args.fork_context {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+    if apply_role {
+        apply_spawn_agent_role(
+            &session,
+            &mut config,
+            role_name,
+            args.reasoning_effort.clone(),
+        )
+        .await?;
     }
     apply_spawn_agent_service_tier(&session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;

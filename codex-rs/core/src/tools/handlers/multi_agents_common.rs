@@ -356,13 +356,22 @@ pub(crate) async fn apply_spawn_agent_role(
     session: &Session,
     config: &mut Config,
     role_name: Option<&str>,
+    requested_reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<(), FunctionCallError> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
     apply_role_to_config(config, role_name)
         .await
         .map_err(FunctionCallError::RespondToModel)?;
-    if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
+    // Explicit invocation effort wins over the role default. Validate it against
+    // the resolved child model, including cross-provider roles.
+    let has_requested_effort = requested_reasoning_effort.is_some();
+    if let Some(effort) = requested_reasoning_effort {
+        config.model_reasoning_effort = Some(effort);
+    }
+    if !has_requested_effort
+        && config.model == previous_model
+        && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());
     }

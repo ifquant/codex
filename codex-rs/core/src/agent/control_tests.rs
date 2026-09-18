@@ -3674,7 +3674,20 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
 
 #[tokio::test]
 async fn resume_thread_subagent_restores_stored_metadata() {
-    let (home, config) = test_config().await;
+    let (home, mut config) = test_config().await;
+    let role_path = config.codex_home.join("effort-role.toml");
+    tokio::fs::write(&role_path, "model_reasoning_effort = \"high\"\n")
+        .await
+        .expect("write role config");
+    config.agent_roles.insert(
+        "explorer".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path.to_path_buf()),
+            nickname_candidates: None,
+        },
+    );
+    config.model_reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::Max);
     let thread_store = Arc::new(InMemoryThreadStore::default());
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
@@ -3812,6 +3825,10 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         .expect("resumed child thread should exist")
         .config_snapshot()
         .await;
+    assert_eq!(
+        resumed_snapshot.reasoning_effort,
+        Some(codex_protocol::openai_models::ReasoningEffort::Max)
+    );
     let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: resumed_parent_thread_id,
         depth: resumed_depth,

@@ -801,58 +801,64 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread(StartThreadOptions::new((*turn.config).clone()))
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    let mut turn = turn;
-    turn.config = Arc::new(config);
-    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
+    for requested_effort in [None, Some(ReasoningEffort::Max)] {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let role_name = install_role_with_model_override(&mut turn).await;
+        let manager = thread_manager();
+        let root = manager
+            .start_thread(StartThreadOptions::new((*turn.config).clone()))
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        let mut turn = turn;
+        turn.config = Arc::new(config);
+        turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
-    let output = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "partial_fork",
-                "agent_type": role_name,
-                "fork_turns": "1"
-            })),
-        ))
-        .await
-        .expect("partial fork should allow agent_type overrides");
-    let (content, _) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    assert_eq!(result["task_name"], "/root/partial_fork");
-    let agent_id = manager
-        .captured_ops()
-        .into_iter()
-        .map(|(thread_id, _)| thread_id)
-        .find(|thread_id| *thread_id != root.thread_id)
-        .expect("spawned agent should receive an op");
-    let snapshot = manager
-        .get_thread(agent_id)
-        .await
-        .expect("spawned agent thread should exist")
-        .config_snapshot()
-        .await;
+        let output = SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "task_name": "partial_fork",
+                    "agent_type": role_name,
+                    "fork_turns": "1",
+                    "reasoning_effort": requested_effort
+                })),
+            ))
+            .await
+            .expect("partial fork should allow agent_type overrides");
+        let (content, _) = expect_text_output(output);
+        let result: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        assert_eq!(result["task_name"], "/root/partial_fork");
+        let agent_id = manager
+            .captured_ops()
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .find(|thread_id| *thread_id != root.thread_id)
+            .expect("spawned agent should receive an op");
+        let snapshot = manager
+            .get_thread(agent_id)
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
 
-    assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
-    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+        assert_eq!(snapshot.model, "gpt-5-role-override");
+        assert_eq!(snapshot.model_provider_id, "ollama");
+        assert_eq!(
+            snapshot.reasoning_effort,
+            requested_effort.or(Some(ReasoningEffort::Minimal))
+        );
+    }
 }
 
 #[tokio::test]

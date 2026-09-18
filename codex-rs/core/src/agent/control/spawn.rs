@@ -397,7 +397,6 @@ impl AgentControl {
                 return Ok(());
             }
         }
-        config.model_reasoning_effort = stored_reasoning_effort;
         if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
@@ -434,6 +433,8 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
+        // Restore the effective session effort after reapplying role defaults.
+        config.model_reasoning_effort = stored_reasoning_effort;
         config.service_tier = self.root_service_tier();
         if let Some(model) = stored_model {
             config.model = Some(model);
