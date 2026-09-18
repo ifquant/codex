@@ -1530,6 +1530,26 @@ async fn static_manager_reads_latest_auth_mode() {
 }
 
 #[test]
+fn bundled_models_include_codebuddy_catalog_entry() {
+    let response = crate::bundled_models_response().expect("bundled models.json should parse");
+    let model = response
+        .models
+        .iter()
+        .find(|model| model.slug == "deepseek-v4.1-flash")
+        .expect("bundled models.json should include CodeBuddy DeepSeek");
+    let instructions = model
+        .model_messages
+        .as_ref()
+        .and_then(|messages| messages.instructions_template.as_deref())
+        .expect("CodeBuddy model should have bundled system instructions");
+    assert!(
+        instructions
+            .starts_with("You are Codex, a coding agent based on DeepSeek V4.1 Flash (CodeBuddy).")
+    );
+    assert!(instructions.len() > 20_000);
+}
+
+#[test]
 fn bundled_models_json_roundtrips() {
     let response = crate::bundled_models_response()
         .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
