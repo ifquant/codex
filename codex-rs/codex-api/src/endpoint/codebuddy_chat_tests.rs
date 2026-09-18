@@ -35,6 +35,10 @@ fn stream(data: String, tools: BTreeMap<String, Tool>) -> ResponseStream {
 #[tokio::test]
 async fn streams_parallel_tools_and_replays_reasoning_and_custom_input() {
     let (body, tools) = encode(request()).unwrap();
+    assert_eq!(
+        body["messages"][0],
+        json!({"role":"system","content":"You are a coding assistant. Follow the user's request and use available tools when needed."})
+    );
     assert_eq!(body["reasoning_effort"], "high");
     assert_eq!(body["thinking"], json!({"type":"enabled"}));
     assert_eq!(
