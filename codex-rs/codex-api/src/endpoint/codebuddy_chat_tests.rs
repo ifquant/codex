@@ -151,6 +151,23 @@ fn folds_assistant_commentary_before_tool_results() {
 }
 
 #[test]
+fn preserves_orphan_reasoning_before_parent_message() {
+    let mut value = request();
+    value["input"] = json!([
+        {"type":"message","role":"user","content":"Inspect the workspace"},
+        {"type":"reasoning","content":"I was interrupted while planning.","encrypted_content":null},
+        {"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Continue."}]}
+    ]);
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(body["messages"][2]["role"], "assistant");
+    assert_eq!(
+        body["messages"][2]["reasoning_content"],
+        "I was interrupted while planning."
+    );
+    assert_eq!(body["messages"][3]["role"], "user");
+}
+
+#[test]
 fn replaces_long_agent_system_prompt_for_codebuddy() {
     let mut value = request();
     value["instructions"] = format!("You are a coding agent. {}", "rules ".repeat(400)).into();
@@ -236,6 +253,25 @@ async fn rejects_truncated_streams_and_incomplete_tool_calls() {
             )
         )));
     }
+}
+
+#[tokio::test]
+async fn accepts_length_finish_for_text_without_tool_calls() {
+    let data = "data: {\"id\":\"text\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"id\":\"text\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+    let events = stream(data.into(), BTreeMap::new())
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Ok(ResponseEvent::OutputTextDelta(text)) if text == "partial"
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(Ok(ResponseEvent::Completed {
+            end_turn: Some(true),
+            ..
+        }))
+    ));
 }
 
 #[tokio::test]

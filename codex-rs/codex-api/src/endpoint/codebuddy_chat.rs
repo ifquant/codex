@@ -200,6 +200,13 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                     return Err(invalid("unsupported message role"));
                 }
                 let wire_role = if role == "developer" { "system" } else { role };
+                if wire_role != "assistant" && !reasoning.is_empty() {
+                    messages.push(json!({
+                        "role":"assistant",
+                        "content":"",
+                        "reasoning_content":std::mem::take(&mut reasoning)
+                    }));
+                }
                 let content = text(&item["content"])?;
                 if wire_role == "system" && model_switch_text(&content).is_some() {
                     continue;
@@ -279,6 +286,13 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                 message["tool_calls"].as_array_mut().ok_or_else(|| invalid("invalid tool call array"))?.push(json!({"id":string(item,"call_id")?,"type":"function","function":{"name":name,"arguments":arguments}}));
             }
             Some("function_call_output" | "custom_tool_call_output") => {
+                if !reasoning.is_empty() {
+                    messages.push(json!({
+                        "role":"assistant",
+                        "content":"",
+                        "reasoning_content":std::mem::take(&mut reasoning)
+                    }));
+                }
                 messages.push(json!({"role":"tool","tool_call_id":string(item,"call_id")?,"content":text(&item["output"])?}));
             }
             _ => {
@@ -289,7 +303,11 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
         }
     }
     if !reasoning.is_empty() {
-        return Err(invalid("reasoning without an assistant message"));
+        messages.push(json!({
+            "role":"assistant",
+            "content":"",
+            "reasoning_content":reasoning
+        }));
     }
     if serde_json::to_vec(&tools).is_ok_and(|bytes| bytes.len() >= 64 * 1024) {
         for tool in &mut tools {

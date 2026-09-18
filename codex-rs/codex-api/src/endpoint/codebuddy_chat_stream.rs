@@ -124,7 +124,7 @@ impl Completion {
 
     fn finish(self, tools: &BTreeMap<String, Tool>) -> Result<Vec<ResponseEvent>, ApiError> {
         match self.finish.as_deref() {
-            Some("stop") if self.calls.is_empty() => {}
+            Some("stop" | "length") if self.calls.is_empty() => {}
             Some("tool_calls") if !self.calls.is_empty() => {}
             _ => {
                 return Err(invalid(
