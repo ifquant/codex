@@ -122,7 +122,11 @@ fn rejects_unsupported_history_effort_and_tool_collisions() {
         ));
     }
     let mut value = request();
-    value["reasoning"]["effort"] = "max".into();
+    for effort in ["high", "max"] {
+        value["reasoning"]["effort"] = effort.into();
+        assert_eq!(encode(value.clone()).unwrap().0["reasoning_effort"], effort);
+    }
+    value["reasoning"]["effort"] = "medium".into();
     assert!(encode(value).is_err());
     let mut value = request();
     value["tools"]

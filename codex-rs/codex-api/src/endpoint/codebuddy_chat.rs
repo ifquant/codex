@@ -235,9 +235,9 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
         }
     };
     let effort = request["reasoning"]["effort"].as_str().unwrap_or("high");
-    if effort != "high" {
+    if !matches!(effort, "high" | "max") {
         return Err(invalid(
-            "this adapter currently supports only high reasoning",
+            "this adapter currently supports only high or max reasoning",
         ));
     }
     Ok((
