@@ -132,6 +132,18 @@ fn rejects_unsupported_history_effort_and_tool_collisions() {
     assert!(encode(value).is_err());
 }
 
+#[test]
+fn preserves_supported_tool_choices_and_rejects_named_choices() {
+    for choice in ["auto", "none", "required"] {
+        let mut value = request();
+        value["tool_choice"] = choice.into();
+        assert_eq!(encode(value).unwrap().0["tool_choice"], choice);
+    }
+    let mut value = request();
+    value["tool_choice"] = json!({"type":"function","function":{"name":"exec_command"}});
+    assert!(encode(value).is_err());
+}
+
 #[tokio::test]
 async fn rejects_truncated_streams_and_incomplete_tool_calls() {
     for suffix in ["", "data: [DONE]\n\n"] {

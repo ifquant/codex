@@ -222,6 +222,18 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
     if request.get("text").is_some_and(|t| !t["format"].is_null()) {
         return Err(invalid("structured response formats are not supported yet"));
     }
+    let tool_choice = match request.get("tool_choice") {
+        None => "auto".to_owned(),
+        Some(Value::String(choice)) if matches!(choice.as_str(), "auto" | "none" | "required") => {
+            choice.clone()
+        }
+        Some(Value::Null) => "auto".to_owned(),
+        Some(_) => {
+            return Err(invalid(
+                "named tool_choice is not supported by CodeBuddy; use auto, none, or required",
+            ));
+        }
+    };
     let effort = request["reasoning"]["effort"].as_str().unwrap_or("high");
     if effort != "high" {
         return Err(invalid(
@@ -229,7 +241,7 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
         ));
     }
     Ok((
-        json!({"model":string(&request,"model")?,"messages":messages,"tools":tools,"tool_choice":"auto","stream":true,"stream_options":{"include_usage":true},"reasoning_effort":effort,"thinking":{"type":"enabled"}}),
+        json!({"model":string(&request,"model")?,"messages":messages,"tools":tools,"tool_choice":tool_choice,"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":effort,"thinking":{"type":"enabled"}}),
         advertised_tools,
     ))
 }
