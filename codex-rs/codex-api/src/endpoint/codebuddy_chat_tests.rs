@@ -187,6 +187,18 @@ fn preserves_short_non_agent_system_prompt_for_codebuddy() {
 }
 
 #[test]
+fn skips_responses_control_items_when_replaying_agent_history() {
+    let mut value = request();
+    value["input"] = json!([
+        {"type":"additional_tools", "role":"developer", "tools":[{"type":"function","name":"external_agents__spawn_agent"}]},
+        {"type":"message", "role":"user", "content":"Continue the child task."}
+    ]);
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(body["messages"][1]["content"], "Continue the child task.");
+}
+
+#[test]
 fn compacts_oversized_codebuddy_tool_descriptions() {
     let mut value = request();
     value["tools"][0]["tools"][0]["description"] = "x".repeat(70_000).into();

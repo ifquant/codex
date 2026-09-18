@@ -178,6 +178,9 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
         .ok_or_else(|| invalid("input must be an array"))?
     {
         match item["type"].as_str() {
+            // Responses uses this item to mutate the host-side tool set.
+            // Chat Completions already receives the effective tool list above.
+            Some("additional_tools") => {}
             Some("reasoning") => {
                 if !item["encrypted_content"].is_null() {
                     return Err(invalid(
