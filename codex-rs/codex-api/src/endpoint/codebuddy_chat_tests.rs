@@ -107,6 +107,77 @@ async fn streams_parallel_tools_and_replays_reasoning_and_custom_input() {
 }
 
 #[test]
+fn prefers_codebuddy_model_switch_over_parent_system_instructions() {
+    let mut value = request();
+    value["instructions"] = "You are Codex, a coding agent based on GPT-6.".into();
+    value["input"] = json!([
+        {"type":"message","role":"system","content":"<model_switch>\nYou are Codex, a coding agent based on DeepSeek V4.1 Flash (CodeBuddy).\n</model_switch>"},
+        {"type":"message","role":"system","content":"You are an agent in a team. Preserve tool and permission rules."},
+        {"type":"message","role":"user","content":"Continue."}
+    ]);
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        "You are Codex, a coding agent based on DeepSeek V4.1 Flash (CodeBuddy)."
+    );
+    assert_eq!(
+        body["messages"][1]["content"],
+        CODEBUDDY_NEUTRAL_SYSTEM_PROMPT
+    );
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn folds_assistant_commentary_before_tool_results() {
+    let mut value = request();
+    value["input"] = json!([
+        {"type":"message","role":"user","content":"Run pwd"},
+        {"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{}"},
+        {"type":"message","role":"assistant","content":"I will inspect the workspace first."},
+        {"type":"function_call_output","call_id":"call_1","output":"/tmp"}
+    ]);
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(body["messages"][2]["role"], "assistant");
+    assert_eq!(
+        body["messages"][2]["content"],
+        "I will inspect the workspace first."
+    );
+    assert_eq!(
+        body["messages"][3],
+        json!({
+            "role":"tool", "tool_call_id":"call_1", "content":"/tmp"
+        })
+    );
+}
+
+#[test]
+fn replaces_long_agent_system_prompt_for_codebuddy() {
+    let mut value = request();
+    value["instructions"] = format!("You are a coding agent. {}", "rules ".repeat(400)).into();
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        CODEBUDDY_NEUTRAL_SYSTEM_PROMPT
+    );
+}
+
+#[test]
+fn preserves_short_non_agent_system_prompt_for_codebuddy() {
+    let mut value = request();
+    value["instructions"] = "Answer in Chinese.".into();
+    let (body, _) = encode(value).unwrap();
+    assert_eq!(body["messages"][0]["content"], "Answer in Chinese.");
+}
+
+#[test]
+fn compacts_oversized_codebuddy_tool_descriptions() {
+    let mut value = request();
+    value["tools"][0]["tools"][0]["description"] = "x".repeat(70_000).into();
+    let (body, _) = encode(value).unwrap();
+    assert!(body["tools"][0]["function"].get("description").is_none());
+}
+
+#[test]
 fn rejects_unsupported_history_effort_and_tool_collisions() {
     for input in [
         json!({"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque"}]}),

@@ -16,6 +16,29 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 
+const CODEBUDDY_NEUTRAL_SYSTEM_PROMPT: &str =
+    "You are a helpful AI assistant that helps with software engineering tasks.";
+
+fn sanitize_system_prompt(content: &str) -> &str {
+    let lower = content.to_ascii_lowercase();
+    if content.len() > 2000
+        || lower.contains("you are an agent")
+        || lower.contains("you are a coding agent")
+        || lower.contains("claude code")
+        || lower.contains("anthropic")
+        || lower.contains("cursor")
+        || lower.contains("windsurf")
+        || lower.contains("orchestration capabilities")
+        || lower.contains("external_agents.spawn_agent")
+        || lower.contains("<agent-identity>")
+        || lower.contains("<behavior_instructions>")
+    {
+        CODEBUDDY_NEUTRAL_SYSTEM_PROMPT
+    } else {
+        content
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq)]
 pub(super) struct Tool {
     pub name: String,
@@ -59,6 +82,12 @@ fn register(tools: &mut BTreeMap<String, Tool>, tool: Tool) -> Result<String, Ap
         return Err(invalid("flattened tool names collide"));
     }
     Ok(name)
+}
+
+fn model_switch_text(content: &str) -> Option<&str> {
+    let start = content.find("<model_switch>")? + "<model_switch>".len();
+    let end = content[start..].find("</model_switch>")? + start;
+    Some(content[start..end].trim())
 }
 
 fn text(content: &Value) -> Result<String, ApiError> {
@@ -125,12 +154,22 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
     }
     let advertised_tools = mapping.clone();
     let mut messages = Vec::new();
-    if let Some(instructions) = request["instructions"].as_str()
-        && !instructions.is_empty()
-    {
+    let model_switch = request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| matches!(item["type"].as_str(), Some("message" | "agent_message")))
+        .filter(|item| matches!(item["role"].as_str(), Some("system" | "developer")))
+        .filter_map(|item| text(&item["content"]).ok())
+        .find_map(|content| model_switch_text(&content).map(str::to_owned));
+    let instructions = model_switch
+        .as_deref()
+        .or_else(|| request["instructions"].as_str())
+        .filter(|instructions| !instructions.is_empty());
+    if let Some(instructions) = instructions {
         messages.push(json!({
             "role":"system",
-            "content":instructions
+            "content":sanitize_system_prompt(instructions)
         }));
     }
     let mut reasoning = String::new();
@@ -160,7 +199,42 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                 if !matches!(role, "user" | "assistant" | "system" | "developer") {
                     return Err(invalid("unsupported message role"));
                 }
-                let mut message = json!({"role":if role == "developer" {"system"} else {role},"content":text(&item["content"])?});
+                let wire_role = if role == "developer" { "system" } else { role };
+                let content = text(&item["content"])?;
+                if wire_role == "system" && model_switch_text(&content).is_some() {
+                    continue;
+                }
+                let content = if wire_role == "system" {
+                    sanitize_system_prompt(&content)
+                } else {
+                    &content
+                };
+                // Responses may emit assistant commentary between a tool-call
+                // item and its tool results. Chat Completions requires the
+                // results to follow the calling assistant message directly;
+                // fold that commentary into the calling message.
+                if wire_role == "assistant"
+                    && messages
+                        .last()
+                        .is_some_and(|message| message["tool_calls"].is_array())
+                {
+                    let message = messages
+                        .last_mut()
+                        .ok_or_else(|| invalid("missing assistant message"))?;
+                    if !content.is_empty() {
+                        let existing = message["content"].as_str().unwrap_or_default();
+                        message["content"] = if existing.is_empty() {
+                            content.to_owned().into()
+                        } else {
+                            format!("{existing}\n\n{content}").into()
+                        };
+                    }
+                    if !reasoning.is_empty() {
+                        message["reasoning_content"] = std::mem::take(&mut reasoning).into();
+                    }
+                    continue;
+                }
+                let mut message = json!({"role":wire_role,"content":content});
                 if role == "assistant" && !reasoning.is_empty() {
                     message["reasoning_content"] = std::mem::take(&mut reasoning).into();
                 }
@@ -216,6 +290,13 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
     }
     if !reasoning.is_empty() {
         return Err(invalid("reasoning without an assistant message"));
+    }
+    if serde_json::to_vec(&tools).is_ok_and(|bytes| bytes.len() >= 64 * 1024) {
+        for tool in &mut tools {
+            if let Some(function) = tool["function"].as_object_mut() {
+                function.remove("description");
+            }
+        }
     }
     if request.get("text").is_some_and(|t| !t["format"].is_null()) {
         return Err(invalid("structured response formats are not supported yet"));
