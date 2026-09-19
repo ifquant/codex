@@ -420,6 +420,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut output_limit_recoveries = 0;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -532,12 +533,46 @@ pub(crate) async fn run_turn(
             .await
         }
         .await;
+        // Keep continuation in the existing turn loop: it owns cancellation, history,
+        // budgets and the client session. Never reset this counter after a successful tool step.
+        let sampling_request_result = match sampling_request_result {
+            Ok((output, _input)) if output.output_limit_reason.is_some() => {
+                let reason = output
+                    .output_limit_reason
+                    .expect("guard checked output limit");
+                if cancellation_token.is_cancelled() {
+                    return Err(CodexErr::TurnAborted);
+                }
+                if output_limit_recoveries < 2 {
+                    output_limit_recoveries += 1;
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: format!("{reason}; continuing after output limit ({output_limit_recoveries}/2)"),
+                        }),
+                    ).await;
+                    sess.record_response_item_and_emit_turn_item(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                        ContextualUserFragment::into(crate::context::OutputLimitRecovery),
+                    )
+                    .await;
+                    can_drain_pending_input = true;
+                    continue;
+                }
+                Err(CodexErr::Fatal(format!(
+                    "{reason}; output-limit recovery exhausted (2 continuations)"
+                )))
+            }
+            result => result,
+        };
         match sampling_request_result {
             Ok((sampling_request_output, sampling_request_input)) => {
                 guardian_budget_compacted = false;
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    output_limit_reason: _,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -1784,6 +1819,7 @@ pub(crate) async fn built_tools(
 
 #[derive(Debug)]
 struct SamplingRequestResult {
+    output_limit_reason: Option<String>,
     needs_follow_up: bool,
     last_agent_message: Option<String>,
 }
@@ -2640,6 +2676,7 @@ async fn try_run_sampling_request(
                 // todo: remove before stabilizing multi-agent v2
                 if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
                     break Ok(SamplingRequestResult {
+                        output_limit_reason: None,
                         needs_follow_up: true,
                         last_agent_message,
                     });
@@ -2778,6 +2815,36 @@ async fn try_run_sampling_request(
                     .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
                     .await;
             }
+            ResponseEvent::Incomplete {
+                token_usage,
+                reason,
+                kind,
+                ..
+            } => {
+                flush_assistant_text_segments_all(
+                    &sess,
+                    &turn_context,
+                    plan_mode_state.as_mut(),
+                    &mut assistant_message_stream_parsers,
+                )
+                .await;
+                let budget_result = sess
+                    .record_token_usage_info(&turn_context, token_usage.as_ref())
+                    .await;
+                should_emit_token_count = true;
+                should_emit_turn_diff = true;
+                if let Err(err) = budget_result {
+                    break Err(err);
+                }
+                if kind == codex_api::IncompleteKind::OutputLimit {
+                    break Ok(SamplingRequestResult {
+                        output_limit_reason: Some(reason),
+                        needs_follow_up: true,
+                        last_agent_message,
+                    });
+                }
+                break Err(CodexErr::Fatal(reason));
+            }
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
@@ -2820,6 +2887,7 @@ async fn try_run_sampling_request(
                     needs_follow_up = true;
                 }
                 break Ok(SamplingRequestResult {
+                    output_limit_reason: None,
                     needs_follow_up,
                     last_agent_message,
                 });

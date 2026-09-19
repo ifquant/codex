@@ -1352,3 +1352,34 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn incomplete_response_is_terminal_and_not_cached_as_completed() {
+    let api_stream = futures::stream::iter([
+        Ok(ResponseEvent::Incomplete {
+            response_id: "limited".into(),
+            token_usage: None,
+            reason: "output limit".into(),
+            kind: codex_api::IncompleteKind::OutputLimit,
+        }),
+        Ok(ResponseEvent::Completed {
+            response_id: "must-not-be-consumed".into(),
+            token_usage: None,
+            usage_metadata: None,
+            end_turn: Some(true),
+        }),
+    ]);
+    let (mut stream, last_response) = super::map_response_events(
+        /*upstream_request_id*/ None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+    );
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ResponseEvent::Incomplete { .. }))
+    ));
+    assert!(stream.next().await.is_none());
+    assert!(last_response.await.is_err());
+}

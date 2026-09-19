@@ -393,6 +393,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
         | ResponseEvent::ServerReasoningIncluded(_)
         | ResponseEvent::ToolCallInputDelta { .. }
         | ResponseEvent::Completed { .. }
+        | ResponseEvent::Incomplete { .. }
         | ResponseEvent::ReasoningSummaryPartAdded { .. }
         | ResponseEvent::RateLimits(_)
         | ResponseEvent::ModelsEtag(_) => false,

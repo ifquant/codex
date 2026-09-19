@@ -809,6 +809,15 @@ async fn drain_to_completed(
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 sess.update_rate_limits(turn_context, snapshot).await;
             }
+            Ok(ResponseEvent::Incomplete {
+                token_usage,
+                reason,
+                ..
+            }) => {
+                sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                    .await?;
+                return Err(CodexErr::Fatal(reason));
+            }
             Ok(ResponseEvent::Completed {
                 response_id,
                 token_usage,

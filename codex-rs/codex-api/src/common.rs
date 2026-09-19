@@ -76,6 +76,12 @@ pub struct MemorySummarizeOutput {
 #[derive(Clone, Debug)]
 pub struct ResponseId(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncompleteKind {
+    OutputLimit,
+    ProviderError,
+}
+
 #[derive(Debug)]
 pub enum ResponseEvent {
     Created {
@@ -103,6 +109,14 @@ pub enum ResponseEvent {
         /// Did the model affirmatively end its turn? Some providers do not set this,
         /// so we rely on fallback logic when this is `None`.
         end_turn: Option<bool>,
+    },
+    /// Generation stopped at a provider limit; partial output and usage remain valid.
+    /// Terminal for this request; only typed output limits permit bounded host continuation.
+    Incomplete {
+        response_id: String,
+        token_usage: Option<TokenUsage>,
+        reason: String,
+        kind: IncompleteKind,
     },
     OutputTextDelta(String),
     ToolCallInputDelta {

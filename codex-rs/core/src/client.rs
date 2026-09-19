@@ -2185,6 +2185,19 @@ where
                         return;
                     }
                 }
+                Ok(event @ ResponseEvent::Incomplete { .. }) => {
+                    if let ResponseEvent::Incomplete { reason, .. } = &event {
+                        inference_trace_attempt.record_failed(
+                            reason,
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        session_telemetry
+                            .see_event_completed_failed(&CodexErr::Fatal(reason.clone()));
+                    }
+                    let _ = tx_event.send(Ok(event)).await;
+                    return;
+                }
                 Ok(ResponseEvent::Completed {
                     response_id,
                     token_usage,

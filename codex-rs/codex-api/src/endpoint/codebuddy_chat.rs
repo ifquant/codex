@@ -12,32 +12,10 @@ use http::Method;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
-
-const CODEBUDDY_NEUTRAL_SYSTEM_PROMPT: &str =
-    "You are a helpful AI assistant that helps with software engineering tasks.";
-
-fn sanitize_system_prompt(content: &str) -> &str {
-    let lower = content.to_ascii_lowercase();
-    if content.len() > 2000
-        || lower.contains("you are an agent")
-        || lower.contains("you are a coding agent")
-        || lower.contains("claude code")
-        || lower.contains("anthropic")
-        || lower.contains("cursor")
-        || lower.contains("windsurf")
-        || lower.contains("orchestration capabilities")
-        || lower.contains("external_agents.spawn_agent")
-        || lower.contains("<agent-identity>")
-        || lower.contains("<behavior_instructions>")
-    {
-        CODEBUDDY_NEUTRAL_SYSTEM_PROMPT
-    } else {
-        content
-    }
-}
 
 #[derive(Clone, Debug, Hash, PartialEq)]
 pub(super) struct Tool {
@@ -84,12 +62,6 @@ fn register(tools: &mut BTreeMap<String, Tool>, tool: Tool) -> Result<String, Ap
     Ok(name)
 }
 
-fn model_switch_text(content: &str) -> Option<&str> {
-    let start = content.find("<model_switch>")? + "<model_switch>".len();
-    let end = content[start..].find("</model_switch>")? + start;
-    Some(content[start..end].trim())
-}
-
 fn text(content: &Value) -> Result<String, ApiError> {
     if let Some(text) = content.as_str() {
         return Ok(text.to_owned());
@@ -116,7 +88,23 @@ fn text(content: &Value) -> Result<String, ApiError> {
 pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), ApiError> {
     let mut mapping = BTreeMap::new();
     let mut tools = Vec::new();
-    for spec in request["tools"].as_array().into_iter().flatten() {
+    let input = request["input"]
+        .as_array()
+        .ok_or_else(|| invalid("input must be an array"))?;
+    let mut specs = request["tools"].as_array().cloned().unwrap_or_default();
+    for item in input
+        .iter()
+        .filter(|item| item["type"] == "additional_tools")
+    {
+        specs.extend(
+            item["tools"]
+                .as_array()
+                .ok_or_else(|| invalid("additional_tools lacks a tools array"))?
+                .iter()
+                .cloned(),
+        );
+    }
+    for spec in &specs {
         let (namespace, children) = if spec["type"] == "namespace" {
             (
                 Some(string(spec, "name")?.to_owned()),
@@ -132,7 +120,7 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
             let custom = match spec["type"].as_str() {
                 Some("function") => false,
                 Some("custom") => true,
-                _ => return Err(invalid("only function and custom tools are supported")),
+                _ => return Err(invalid(format!("unsupported tool type: {}", spec["type"]))),
             };
             let name = register(
                 &mut mapping,
@@ -149,28 +137,23 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                     .cloned()
                     .unwrap_or_else(|| json!({"type":"object","properties":{}}))
             };
-            tools.push(json!({"type":"function","function":{"name":name,"description":spec["description"].as_str().unwrap_or_default(),"parameters":parameters}}));
+            let definition = json!({"type":"function","function":{"name":name,"description":spec["description"].as_str().unwrap_or_default(),"parameters":parameters}});
+            if let Some(previous) = tools
+                .iter()
+                .find(|tool: &&Value| tool["function"]["name"] == name)
+            {
+                if previous != &definition {
+                    return Err(invalid("conflicting definitions for the same tool"));
+                }
+            } else {
+                tools.push(definition);
+            }
         }
     }
     let advertised_tools = mapping.clone();
     let mut messages = Vec::new();
-    let model_switch = request["input"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| matches!(item["type"].as_str(), Some("message" | "agent_message")))
-        .filter(|item| matches!(item["role"].as_str(), Some("system" | "developer")))
-        .filter_map(|item| text(&item["content"]).ok())
-        .find_map(|content| model_switch_text(&content).map(str::to_owned));
-    let instructions = model_switch
-        .as_deref()
-        .or_else(|| request["instructions"].as_str())
-        .filter(|instructions| !instructions.is_empty());
-    if let Some(instructions) = instructions {
-        messages.push(json!({
-            "role":"system",
-            "content":sanitize_system_prompt(instructions)
-        }));
+    if let Some(instructions) = request["instructions"].as_str().filter(|s| !s.is_empty()) {
+        messages.push(json!({"role":"system","content":instructions}));
     }
     let mut reasoning = String::new();
     for item in request["input"]
@@ -178,8 +161,7 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
         .ok_or_else(|| invalid("input must be an array"))?
     {
         match item["type"].as_str() {
-            // Responses uses this item to mutate the host-side tool set.
-            // Chat Completions already receives the effective tool list above.
+            // Both tool locations have already been collected into the advertised map.
             Some("additional_tools") => {}
             Some("reasoning") => {
                 if !item["encrypted_content"].is_null() {
@@ -189,9 +171,8 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                 }
                 if !item["content"].is_null() {
                     reasoning.push_str(&text(&item["content"])?);
-                } else {
-                    reasoning.push_str(&text(&item["summary"])?);
                 }
+                // Display summaries are not raw reasoning and must not be replayed as such.
             }
             Some("message" | "agent_message") => {
                 let role = if item["type"] == "agent_message" {
@@ -211,14 +192,6 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
                     }));
                 }
                 let content = text(&item["content"])?;
-                if wire_role == "system" && model_switch_text(&content).is_some() {
-                    continue;
-                }
-                let content = if wire_role == "system" {
-                    sanitize_system_prompt(&content)
-                } else {
-                    &content
-                };
                 // Responses may emit assistant commentary between a tool-call
                 // item and its tool results. Chat Completions requires the
                 // results to follow the calling assistant message directly;
@@ -312,12 +285,30 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
             "reasoning_content":reasoning
         }));
     }
-    if serde_json::to_vec(&tools).is_ok_and(|bytes| bytes.len() >= 64 * 1024) {
-        for tool in &mut tools {
-            if let Some(function) = tool["function"].as_object_mut() {
-                function.remove("description");
+    // Validate the final Chat sequence after folding assistant commentary.
+    // Never fabricate missing results or silently discard unmatched calls.
+    let mut seen = BTreeSet::new();
+    let mut pending = BTreeSet::new();
+    for message in &messages {
+        if message["role"] == "tool" {
+            if !pending.remove(string(message, "tool_call_id")?) {
+                return Err(invalid("unmatched or duplicate tool result"));
+            }
+        } else {
+            if !pending.is_empty() {
+                return Err(invalid("tool results must precede the next message"));
+            }
+            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                let id = string(call, "id")?;
+                if id.is_empty() || !seen.insert(id) {
+                    return Err(invalid("empty or duplicate historical tool call ID"));
+                }
+                pending.insert(id);
             }
         }
+    }
+    if !pending.is_empty() {
+        return Err(invalid("missing historical tool results"));
     }
     if request.get("text").is_some_and(|t| !t["format"].is_null()) {
         return Err(invalid("structured response formats are not supported yet"));
@@ -340,10 +331,24 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
             "this adapter currently supports only high or max reasoning",
         ));
     }
-    Ok((
-        json!({"model":string(&request,"model")?,"messages":messages,"tools":tools,"tool_choice":tool_choice,"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":effort,"thinking":{"type":"enabled"}}),
-        advertised_tools,
-    ))
+    let mut body = json!({"model":string(&request,"model")?,"messages":messages,"tools":tools,"tool_choice":tool_choice,"stream":true,"stream_options":{"include_usage":true},"reasoning_effort":effort,"thinking":{"type":"enabled"}});
+    let mut output_budget = None;
+    for key in ["max_output_tokens", "max_completion_tokens", "max_tokens"] {
+        if let Some(value) = request.get(key) {
+            let value = value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| invalid(format!("{key} must be a positive integer")))?;
+            if output_budget.is_some_and(|previous| previous != value) {
+                return Err(invalid("conflicting output token budgets"));
+            }
+            output_budget = Some(value);
+        }
+    }
+    if let Some(value) = output_budget {
+        body["max_tokens"] = value.into();
+    }
+    Ok((body, advertised_tools))
 }
 
 pub(super) async fn stream<T: HttpTransport>(
