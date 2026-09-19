@@ -197,3 +197,82 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()> 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn codebuddy_active_http_stream_survives_idle_window_and_cancellation_closes_socket()
+-> Result<()> {
+    use codex_api::ResponsesEndpoint;
+    use codex_client::ReqwestTransport;
+    use codex_http_client::HttpClientBuilder;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::io::BufReader;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await?;
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        assert!(line.starts_with("POST /chat/completions "));
+        let mut content_length = None;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await?;
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = Some(value.trim().parse::<usize>()?);
+            }
+        }
+        let mut body = vec![0; content_length.expect("request must have a content length")];
+        reader.read_exact(&mut body).await?;
+        let body: Value = serde_json::from_slice(&body)?;
+        assert_eq!(body["reasoning_effort"], "max");
+        let mut socket = reader.into_inner();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await?;
+        for _ in 0..22 {
+            let data = "data: {\"id\":\"live\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n";
+            socket
+                .write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut byte = [0];
+        assert_eq!(
+            socket.read(&mut byte).await?,
+            0,
+            "cancel must close the real HTTP socket"
+        );
+        Ok::<_, anyhow::Error>(())
+    });
+    let transport = ReqwestTransport::from_http_client(HttpClientBuilder::new().build_direct()?);
+    let mut provider = provider("codebuddy");
+    provider.base_url = format!("http://{address}");
+    provider.stream_idle_timeout = Duration::from_secs(2);
+    let client = ResponsesClient::new(transport, provider, Arc::new(NoAuth))
+        .with_endpoint(ResponsesEndpoint::CodebuddyChat);
+    let mut stream = client.stream(
+        serde_json::json!({"model":"deepseek-v4.1-flash","reasoning":{"effort":"max"},"input":[],"tools":[]}),
+        HeaderMap::new(), Compression::None, /*turn_state*/ None,
+    ).await?;
+    let started = tokio::time::Instant::now();
+    let mut deltas = 0;
+    while let Some(event) = stream.next().await {
+        if matches!(event?, ResponseEvent::OutputTextDelta(_)) {
+            deltas += 1;
+        }
+        if deltas == 22 {
+            break;
+        }
+    }
+    assert_eq!(deltas, 22);
+    assert!(started.elapsed() > Duration::from_secs(2));
+    drop(stream);
+    // The socket must close before the two-second SSE idle timeout can do it.
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    Ok(())
+}
