@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_core::config::AgentRoleConfig;
@@ -14,9 +15,11 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_once_match;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -24,6 +27,7 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::time::Duration;
+use test_case::test_case;
 use tokio::time::Instant;
 use tokio::time::sleep;
 
@@ -145,7 +149,8 @@ fn configure_multi_agent_v2_with_role(
         .expect("test config should allow feature update");
     config.multi_agent_v2.subagent_developer_instructions =
         Some(SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
-    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    // Keep the root and all three descendants resident until the explicit cold restart.
+    config.multi_agent_v2.max_concurrent_threads_per_session = 4;
     // Roles select a registered provider; their inline endpoint and auth overrides are ignored.
     config.model_providers.insert(
         ROLE_MODEL_PROVIDER_ID.to_string(),
@@ -169,8 +174,12 @@ fn configure_multi_agent_v2_with_role(
     );
 }
 
+#[test_case(Duration::ZERO; "immediate grandchild")]
+#[test_case(Duration::from_secs(2); "delayed grandchild")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Result<()> {
+async fn cold_root_resume_restores_agent_identity_and_role_on_followup(
+    grandchild_response_delay: Duration,
+) -> Result<()> {
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": INITIAL_TASK,
@@ -212,14 +221,15 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    let nested_mock = mount_sse_once_match(
+    let nested_mock = mount_response_once_match(
         &server,
         |request: &wiremock::Request| {
             body_contains(request, NESTED_TASK)
                 && request_has_input_type(request, "agent_message")
                 && !body_contains(request, NESTED_CALL_ID)
         },
-        sse(vec![ev_completed("resp-parent-turn-assistant")]),
+        sse_response(sse(vec![ev_completed("resp-parent-turn-assistant")]))
+            .set_delay(grandchild_response_delay),
     )
     .await;
     for (text, is_subagent) in [(NESTED_CALL_ID, true), (QUEUE_CALL_ID, false)] {
@@ -369,9 +379,19 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    sibling_thread.flush_rollout().await?;
-    worker_thread.flush_rollout().await?;
-    initial.codex.flush_rollout().await?;
+    sibling_thread
+        .flush_rollout()
+        .await
+        .context("flush sibling")?;
+    worker_thread
+        .flush_rollout()
+        .await
+        .context("flush worker")?;
+    initial
+        .codex
+        .flush_rollout()
+        .await
+        .context("flush initial root")?;
     sibling_thread.shutdown_and_wait().await?;
     worker_thread.shutdown_and_wait().await?;
     drop(sibling_thread);
@@ -428,7 +448,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let mut resume_builder = test_codex().with_config(move |config| {
         configure_multi_agent_v2_with_role(config, &resumed_model_provider_base_url);
     });
-    let resumed = resume_builder.restart(&server, &initial).await?;
+    let resumed = resume_builder
+        .restart(&server, &initial)
+        .await
+        .context("restart root")?;
     drop(initial);
     assert_eq!(
         resumed.thread_manager.list_thread_ids().await,

@@ -1347,6 +1347,8 @@ async fn grandchild_full_fork_preserves_context_baseline(
                 config.update_plan_enabled = true;
                 // Use local compaction so the test controls the replacement history.
                 config.model_provider.name = "test-provider".to_string();
+                // Custom providers cannot receive native encrypted agent messages.
+                config.multi_agent_v2.encrypt_messages = false;
                 config.compact_prompt = Some(COMPACT_PROMPT.to_string());
                 config.model_auto_compact_token_limit = Some(200_000);
                 config.model_context_window = Some(1_000_000);
