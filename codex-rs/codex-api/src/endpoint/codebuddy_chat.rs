@@ -310,6 +310,45 @@ pub(super) fn encode(request: Value) -> Result<(Value, BTreeMap<String, Tool>), 
     if !pending.is_empty() {
         return Err(invalid("missing historical tool results"));
     }
+    // Fold only exact repeated evidence in the outbound copy. Keep the first result
+    // verbatim so appending another duplicate cannot rewrite the cached prefix.
+    // Persisted response items are never rewritten.
+    let identities: BTreeMap<String, String> = messages
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .map(|call| {
+            (
+                call["id"].as_str().unwrap_or_default().to_owned(),
+                call["function"].to_string(),
+            )
+        })
+        .collect();
+    let mut first_results = BTreeMap::new();
+    for message in messages
+        .iter_mut()
+        .filter(|message| message["role"] == "tool")
+    {
+        let call_id = string(message, "tool_call_id")?;
+        let Some(identity) = identities.get(call_id) else {
+            continue;
+        };
+        let content = string(message, "content")?;
+        if content.len() < 1024 {
+            continue;
+        }
+        let target = first_results
+            .entry((identity.clone(), content.to_owned()))
+            .or_insert_with(|| call_id.to_owned());
+        if target == call_id {
+            continue;
+        }
+        let reference = Value::String(format!(
+            "[Repeated result: identical to tool_call_id={target} earlier in this context. The original call and result remain in the session transcript.]"
+        ));
+        if reference.to_string().len() < message["content"].to_string().len() {
+            message["content"] = reference;
+        }
+    }
     if request.get("text").is_some_and(|t| !t["format"].is_null()) {
         return Err(invalid("structured response formats are not supported yet"));
     }
@@ -372,7 +411,21 @@ pub(super) async fn stream<T: HttpTransport>(
                 );
             },
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if let ApiError::Transport(codex_client::TransportError::Http {
+                status,
+                body: Some(body),
+                ..
+            }) = &error
+                && *status == http::StatusCode::BAD_REQUEST
+                && serde_json::from_str::<Value>(body)
+                    .is_ok_and(|body| body["error"]["code"] == "context_length_exceeded")
+            {
+                return ApiError::ContextWindowExceeded;
+            }
+            error
+        })?;
     Ok(codebuddy_chat_stream::spawn(
         response,
         tools,
@@ -384,3 +437,7 @@ pub(super) async fn stream<T: HttpTransport>(
 #[cfg(test)]
 #[path = "codebuddy_chat_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "codebuddy_chat_noise_tests.rs"]
+mod noise_tests;

@@ -34,6 +34,7 @@ use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_model_provider_info::WireApi;
 use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -60,6 +61,9 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+
+#[path = "compact_codebuddy.rs"]
+mod codebuddy;
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -253,7 +257,8 @@ async fn run_compact_task_inner_impl(
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
-    let mut history = sess.clone_history().await;
+    let original_history = sess.clone_history().await;
+    let mut history = original_history.clone();
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.model_info().truncation_policy.into(),
@@ -272,7 +277,7 @@ async fn run_compact_task_inner_impl(
         )
         .await;
 
-    let compaction_response_id = loop {
+    let (compaction_response_id, summary_suffix) = loop {
         // Clone is required because of the loop
         let turn_input = history
             .clone()
@@ -355,11 +360,12 @@ async fn run_compact_task_inner_impl(
         }
     };
 
-    let history_snapshot = sess.clone_history().await;
-    let history_items = history_snapshot.annotated_items();
-    let summary_suffix =
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
-    let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+    let history_items = original_history.annotated_items();
+    let is_codebuddy = turn_context.provider.info().wire_api == WireApi::CodebuddyChat;
+    let mut summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+    if is_codebuddy && let Ok(Some(path)) = sess.current_rollout_path().await {
+        summary_text.push_str(&format!("\n\nOriginal transcript: {}. Read relevant records here if exact earlier tool evidence is needed.", path.display()));
+    }
     let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
         CompactedMessageIdentity::Preserve
     } else {
@@ -368,6 +374,13 @@ async fn run_compact_task_inner_impl(
     let user_messages = collect_annotated_user_messages(history_items, identity);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    if is_codebuddy {
+        let summary_index = new_history.len().saturating_sub(1);
+        new_history.splice(
+            summary_index..summary_index,
+            codebuddy::recent_tool_exchanges(history_items),
+        );
+    }
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
@@ -768,7 +781,7 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
-) -> CodexResult<String> {
+) -> CodexResult<(String, String)> {
     let mut stream = client_session
         .stream(
             prompt,
@@ -787,6 +800,8 @@ async fn drain_to_completed(
             &InferenceTraceContext::disabled(),
         )
         .await?;
+    // Keep tentative summaries out of live history and the rollout until completion.
+    let mut output_items = Vec::new();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -796,12 +811,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(
-                    turn_context,
-                    turn_context.model_info(),
-                    std::slice::from_ref(&item),
-                )
-                .await;
+                output_items.push(item);
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -833,7 +843,21 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
-                return Ok(response_id);
+                let summary = get_last_assistant_message_from_turn(output_items.iter())
+                    .filter(|summary| !summary.trim().is_empty())
+                    .ok_or_else(|| {
+                        CodexErr::Fatal(
+                            "Compaction returned an empty summary; original history was preserved"
+                                .into(),
+                        )
+                    })?;
+                sess.record_conversation_items(
+                    turn_context,
+                    turn_context.model_info(),
+                    &output_items,
+                )
+                .await;
+                return Ok((response_id, summary));
             }
             Ok(_) => continue,
             Err(e) => return Err(e),

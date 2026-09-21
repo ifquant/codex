@@ -101,6 +101,9 @@ impl Completion {
             };
         }
 
+        if chunk["error"]["code"] == "context_length_exceeded" {
+            return Err(ApiError::ContextWindowExceeded);
+        }
         if !chunk["error"].is_null() {
             self.id = chunk["id"].as_str().unwrap_or(&self.id).to_owned();
             self.failure = Some(format!("CodeBuddy stream error: {chunk}"));
