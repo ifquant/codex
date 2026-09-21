@@ -45,7 +45,7 @@ use super::tool_log_payload;
 struct ExtensionEchoContributor;
 
 #[test]
-fn plaintext_messages_use_the_configured_agent_namespace() {
+fn plaintext_messages_use_configured_or_builtin_external_namespace() {
     for name in ["spawn_agent", "send_message", "followup_task"] {
         let mut call = ToolCall {
             tool_name: ToolName::namespaced("external_agents", name),
@@ -61,14 +61,22 @@ fn plaintext_messages_use_the_configured_agent_namespace() {
         );
         assert_eq!(
             call.direct_source(Some("collaboration"), /*encrypt_messages*/ true),
-            ToolCallSource::Direct
+            ToolCallSource::DirectPlaintextMessage
         );
         call.encrypted_function_args = Some(vec!["message".to_string()]);
         assert_eq!(
             call.direct_source(Some("external_agents"), /*encrypt_messages*/ false),
             ToolCallSource::Direct
         );
+        assert_eq!(
+            call.direct_source(Some("collaboration"), /*encrypt_messages*/ true),
+            ToolCallSource::Direct
+        );
         call.encrypted_function_args = None;
+        assert_eq!(
+            call.direct_source(Some("collaboration"), /*encrypt_messages*/ true),
+            ToolCallSource::DirectPlaintextMessage
+        );
         assert_eq!(
             call.direct_source(Some("external_agents"), /*encrypt_messages*/ true),
             ToolCallSource::Direct

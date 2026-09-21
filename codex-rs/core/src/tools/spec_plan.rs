@@ -41,6 +41,7 @@ use crate::tools::handlers::multi_agents::WaitAgentHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
+use crate::tools::handlers::multi_agents_spec::EXTERNAL_AGENTS_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -1299,51 +1300,66 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                        hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
-                        multi_agent_version: turn_context.multi_agent_version,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                    }),
-                    tool_namespace,
-                    encrypt_messages,
-                ),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace, encrypt_messages),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace, encrypt_messages),
-                exposure,
-            );
-            if turn_context.config.multi_agent_v2.wait_agent_enabled {
+            // Preserve the model's reserved encrypted schema. External providers
+            // need an ordinary, plaintext task on a non-reserved namespace.
+            let external_route = (namespace_tools_enabled(turn_context)
+                && encrypt_messages
+                && tool_namespace != Some(EXTERNAL_AGENTS_NAMESPACE))
+            .then_some((Some(EXTERNAL_AGENTS_NAMESPACE), false));
+            for (tool_namespace, encrypt_messages) in
+                std::iter::once((tool_namespace, encrypt_messages)).chain(external_route)
+            {
                 registry.register_trusted_with_exposure(
                     multi_agent_v2_handler(
-                        WaitAgentHandlerV2::new(context.wait_agent_timeouts),
+                        SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                            available_models: turn_context.available_models.clone(),
+                            agent_type_description: agent_type_description.clone(),
+                            // Built-in provider roles are selectable without user role configuration.
+                            expose_agent_type: true,
+                            hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
+                            expose_spawn_agent_model_overrides: turn_context
+                                .config
+                                .multi_agent_v2
+                                .expose_spawn_agent_model_overrides,
+                            multi_agent_version: turn_context.multi_agent_version,
+                            usage_hint_text: turn_context
+                                .config
+                                .multi_agent_v2
+                                .usage_hint_text
+                                .clone(),
+                        }),
                         tool_namespace,
                         encrypt_messages,
                     ),
                     exposure,
                 );
+                registry.register_trusted_with_exposure(
+                    multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace, encrypt_messages),
+                    exposure,
+                );
+                registry.register_trusted_with_exposure(
+                    multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace, encrypt_messages),
+                    exposure,
+                );
+                if turn_context.config.multi_agent_v2.wait_agent_enabled {
+                    registry.register_trusted_with_exposure(
+                        multi_agent_v2_handler(
+                            WaitAgentHandlerV2::new(context.wait_agent_timeouts),
+                            tool_namespace,
+                            encrypt_messages,
+                        ),
+                        exposure,
+                    );
+                }
+                registry.register_trusted_with_exposure(
+                    multi_agent_v2_handler(InterruptAgentHandler, tool_namespace, encrypt_messages),
+                    exposure,
+                );
+                registry.register_trusted_with_exposure(
+                    multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace, encrypt_messages),
+                    exposure,
+                );
             }
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(InterruptAgentHandler, tool_namespace, encrypt_messages),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace, encrypt_messages),
-                exposure,
-            );
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -1356,7 +1372,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 SpawnAgentHandler::new(SpawnAgentToolOptions {
                     available_models: turn_context.available_models.clone(),
                     agent_type_description,
-                    expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                    expose_agent_type: true,
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
                     multi_agent_version: turn_context.multi_agent_version,
@@ -1370,6 +1386,22 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             registry.add_with_exposure(CloseAgentHandler, exposure);
         }
+    } else if multi_agent_v2_enabled(turn_context)
+        && turn_context.session_source.get_agent_path().is_some()
+    {
+        // Workers must be able to report progress even when their model cannot delegate.
+        // Messaging does not grant child-management authority.
+        let tool_namespace = namespace_tools_enabled(turn_context)
+            .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
+            .flatten();
+        registry.register_trusted_with_exposure(
+            multi_agent_v2_handler(
+                SendMessageHandlerV2,
+                tool_namespace,
+                /*encrypt_messages*/ false,
+            ),
+            ToolExposure::Direct,
+        );
     }
 }
 
@@ -1496,7 +1528,11 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2NamespaceOverride {
                 match &self.namespace {
                     Some(namespace) => ToolSpec::Namespace(ResponsesApiNamespace {
                         name: namespace.clone(),
-                        description: MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string(),
+                        description: if namespace == EXTERNAL_AGENTS_NAMESPACE {
+                            "Use these tools for cross-provider workers such as codebuddy_worker. They send plaintext task messages that external providers can read. Use a fresh context when spawning an external worker.".to_string()
+                        } else {
+                            MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string()
+                        },
                         tools: vec![ResponsesApiNamespaceTool::Function(tool)],
                     }),
                     None => ToolSpec::Function(tool),

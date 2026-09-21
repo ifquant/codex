@@ -9,6 +9,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 #[cfg(test)]
 use crate::tools::handlers::ToolSearchHandlerCache;
+use crate::tools::handlers::multi_agents_spec::EXTERNAL_AGENTS_NAMESPACE;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
@@ -47,7 +48,10 @@ impl ToolCall {
         agent_namespace: Option<&str>,
         encrypt_messages: bool,
     ) -> ToolCallSource {
-        if self.tool_name.namespace.as_deref() == agent_namespace
+        let external_plaintext = self.tool_name.namespace.as_deref()
+            == Some(EXTERNAL_AGENTS_NAMESPACE)
+            && agent_namespace != Some(EXTERNAL_AGENTS_NAMESPACE);
+        if (self.tool_name.namespace.as_deref() == agent_namespace || external_plaintext)
             && matches!(
                 self.tool_name.name.as_str(),
                 "spawn_agent" | "send_message" | "followup_task"
@@ -56,7 +60,7 @@ impl ToolCall {
                 .encrypted_function_args
                 .as_ref()
                 // Unmarked arguments follow the advertised message format.
-                .map_or(!encrypt_messages, Vec::is_empty)
+                .map_or(external_plaintext || !encrypt_messages, Vec::is_empty)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {

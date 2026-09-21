@@ -284,6 +284,12 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
+        if !config.model_provider.is_openai() && communication.encrypted_content.is_some() {
+            return Err(CodexErr::InvalidRequest(
+                "Encrypted agent messages cannot cross providers. No child was created. Retry with external_agents.spawn_agent, a plaintext message, and fork_turns=\"none\". Do not use followup_task to retry a previously failed encrypted spawn."
+                    .to_string(),
+            ));
+        }
         Box::pin(self.spawn_agent_internal(
             config,
             SpawnInitialInput::InterAgentCommunication(communication, context),

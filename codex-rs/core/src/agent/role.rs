@@ -355,6 +355,14 @@ mod built_in {
         static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
             BTreeMap::from([
                 (
+                    "codebuddy_worker".to_string(),
+                    AgentRoleConfig {
+                        description: Some("CodeBuddy DeepSeek V4.1 Flash worker with high reasoning. Requires CODEBUDDY_API_KEY. Use external_agents tools when available to send a plaintext task; encrypted collaboration messages cannot cross providers. Use a fresh context.".to_string()),
+                        config_file: Some("codebuddy-worker.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: None,
+                    },
+                ),
+                (
                     DEFAULT_ROLE_NAME.to_string(),
                     AgentRoleConfig {
                         description: Some("Default agent.".to_string()),
@@ -418,9 +426,11 @@ Rules:
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("../../assets/agent/builtins/explorer.toml");
         const AWAITER: &str = include_str!("../../assets/agent/builtins/awaiter.toml");
+        const CODEBUDDY: &str = include_str!("../../assets/agent/builtins/codebuddy-worker.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
             "awaiter.toml" => Some(AWAITER),
+            "codebuddy-worker.toml" => Some(CODEBUDDY),
             _ => None,
         }
     }

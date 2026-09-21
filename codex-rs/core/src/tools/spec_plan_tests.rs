@@ -56,6 +56,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::WaitForEnvironmentHandler;
+use crate::tools::handlers::multi_agents_spec::EXTERNAL_AGENTS_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::RegisteredTool;
@@ -2717,7 +2718,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             "expected v1 spawn_agent to expose `{property}`"
         );
     }
-    assert!(!properties.contains_key("agent_type"));
+    assert!(properties.contains_key("agent_type"));
 
     let v2 = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
@@ -2773,12 +2774,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    for property in ["model", "reasoning_effort"] {
+    for property in ["model", "reasoning_effort", "agent_type"] {
         assert!(spawn_agent_properties.contains_key(property));
     }
-    for property in ["agent_type", "service_tier"] {
-        assert!(!spawn_agent_properties.contains_key(property));
-    }
+    assert!(!spawn_agent_properties.contains_key("service_tier"));
     let spawn_agent_description = spawn_agent.description.as_str();
     assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
     assert!(spawn_agent_description.contains(
@@ -2836,6 +2835,20 @@ async fn multi_agent_v2_message_schemas_are_encrypted_by_default() {
                 .get("message")
                 .and_then(|schema| schema.encrypted),
             Some(true)
+        );
+    }
+    let ToolSpec::Namespace(external) = plan.visible_spec(EXTERNAL_AGENTS_NAMESPACE) else {
+        panic!("expected external worker tools alongside native encrypted tools");
+    };
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        let Some(ResponsesApiNamespaceTool::Function(tool)) = external.tools.iter().find(|tool| {
+            matches!(tool, ResponsesApiNamespaceTool::Function(tool) if tool.name == tool_name)
+        }) else {
+            panic!("expected external {tool_name}");
+        };
+        assert_eq!(
+            tool.parameters.properties.as_ref().unwrap()["message"].encrypted,
+            None
         );
     }
 }
@@ -3085,7 +3098,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
             plan.assert_visible_contains(&["agents"]);
             plan.assert_registered_contains(&[&spawn_agent_name, &followup_task_name]);
         } else {
-            plan.assert_visible_lacks(&["agents"]);
+            assert_eq!(
+                plan.namespace_function_names("agents"),
+                vec!["send_message"]
+            );
+            plan.assert_registered_contains(&[
+                &ToolName::namespaced("agents", "send_message").to_string()
+            ]);
             plan.assert_registered_lacks(&[&spawn_agent_name, &followup_task_name]);
         }
     }
@@ -3116,6 +3135,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
             "wait",
             "request_user_input",
             "agents",
+            EXTERNAL_AGENTS_NAMESPACE,
             // Hosted Responses tool.
             "web_search",
         ]
@@ -3282,6 +3302,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             "request_user_input",
             // Multi-agent v2 tools.
             MULTI_AGENT_V2_NAMESPACE,
+            EXTERNAL_AGENTS_NAMESPACE,
             // Hosted Responses tools.
             "web_search",
         ]

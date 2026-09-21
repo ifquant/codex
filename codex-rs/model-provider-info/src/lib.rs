@@ -40,6 +40,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
+pub const CODEBUDDY_PROVIDER_ID: &str = "codebuddy-direct";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
@@ -584,12 +585,31 @@ pub fn built_in_model_providers(
     let amazon_bedrock_runtime_provider =
         P::create_amazon_bedrock_runtime_provider(/*aws*/ None);
 
-    // We do not want to be in the business of adjucating which third-party
-    // providers are bundled with Codex CLI, so we only include the OpenAI and
-    // open source ("oss") providers by default. Users are encouraged to add to
-    // `model_providers` in config.toml to add their own providers.
+    // This build also includes CodeBuddy so its worker needs no incompatible
+    // wire_api entry in a config.toml shared with official Codex releases.
     [
         (OPENAI_PROVIDER_ID, openai_provider),
+        (
+            CODEBUDDY_PROVIDER_ID,
+            ModelProviderInfo {
+                name: "CodeBuddy direct".into(),
+                base_url: Some("https://copilot.tencent.com/v2".into()),
+                env_key: Some("CODEBUDDY_API_KEY".into()),
+                wire_api: WireApi::CodebuddyChat,
+                http_headers: Some(HashMap::from([
+                    ("User-Agent".into(), "CLI/2.108.1 CodeBuddy/2.108.1".into()),
+                    ("X-Product".into(), "SaaS".into()),
+                    ("X-IDE-Type".into(), "CLI".into()),
+                    ("X-IDE-Name".into(), "CLI".into()),
+                    ("x-requested-with".into(), "XMLHttpRequest".into()),
+                    ("x-codebuddy-request".into(), "1".into()),
+                ])),
+                request_max_retries: Some(0),
+                stream_max_retries: Some(0),
+                stream_idle_timeout_ms: Some(45_000),
+                ..ModelProviderInfo::default()
+            },
+        ),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (
             AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
@@ -612,8 +632,8 @@ pub fn built_in_model_providers(
 /// Merge configured providers into the built-in provider catalog.
 ///
 /// Configured providers extend the built-in set. Built-in providers are not
-/// generally overridable, but built-in Amazon Bedrock providers allow the user
-/// to customize their endpoint, authentication, headers, and AWS settings.
+/// generally overridable. CodeBuddy permits an explicit replacement; Amazon
+/// Bedrock permits endpoint, authentication, headers, and AWS overrides.
 pub fn merge_configured_model_providers(
     mut model_providers: HashMap<String, ModelProviderInfo>,
     configured_model_providers: HashMap<String, ModelProviderInfo>,
@@ -649,6 +669,8 @@ other non-default provider fields are not supported"
                         .extend(http_headers_override);
                 }
             }
+        } else if key == CODEBUDDY_PROVIDER_ID {
+            model_providers.insert(key, provider);
         } else {
             model_providers.entry(key).or_insert(provider);
         }

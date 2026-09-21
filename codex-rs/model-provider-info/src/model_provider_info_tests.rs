@@ -403,6 +403,20 @@ fn test_built_in_model_providers_include_amazon_bedrock_runtime() {
 }
 
 #[test]
+fn configured_codebuddy_provider_replaces_built_in_defaults() {
+    let defaults = built_in_model_providers(/*openai_base_url*/ None);
+    let mut configured = defaults[CODEBUDDY_PROVIDER_ID].clone();
+    configured.base_url = Some("https://example.com/custom".into());
+    configured.env_key = Some("CUSTOM_CODEBUDDY_KEY".into());
+    let providers = merge_configured_model_providers(
+        defaults,
+        HashMap::from([(CODEBUDDY_PROVIDER_ID.to_string(), configured.clone())]),
+    )
+    .expect("explicit CodeBuddy configuration should remain supported");
+    assert_eq!(providers[CODEBUDDY_PROVIDER_ID], configured);
+}
+
+#[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         name: "Custom".to_string(),

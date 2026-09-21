@@ -1,0 +1,4 @@
+model = "deepseek-v4.1-flash"
+model_provider = "codebuddy-direct"
+model_reasoning_effort = "high"
+developer_instructions = "Complete the task assigned by the parent using the configured CodeBuddy model. Report provider or tool errors clearly. Do not delegate further unless asked."
