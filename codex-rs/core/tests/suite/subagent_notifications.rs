@@ -2298,13 +2298,20 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
     );
     if let Some(model) = model {
         assert_eq!(child_request.body_json()["model"], json!(model));
-        assert!(
-            !child_request
-                .body_json()
-                .to_string()
-                .contains("\"name\":\"collaboration\""),
-            "leaf workers must not receive collaboration tools",
-        );
+        // Leaf workers may report progress, but cannot manage or spawn other agents.
+        let tools = child_request.body_json()["tools"].to_string();
+        for name in [
+            "spawn_agent",
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "wait_agent",
+        ] {
+            assert!(
+                !tools.contains(&format!("\"name\":\"{name}\"")),
+                "leaf workers must not receive {name}",
+            );
+        }
     }
     if plaintext {
         assert!(
@@ -3096,7 +3103,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> Result<()> {
+async fn spawn_agent_role_overrides_model_but_preserves_requested_reasoning_effort() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -3132,7 +3139,10 @@ async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> 
     .await?;
 
     assert_eq!(child_snapshot.model, ROLE_MODEL);
-    assert_eq!(child_snapshot.reasoning_effort, Some(ROLE_REASONING_EFFORT));
+    assert_eq!(
+        child_snapshot.reasoning_effort,
+        Some(REQUESTED_REASONING_EFFORT)
+    );
 
     Ok(())
 }
