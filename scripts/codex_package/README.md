@@ -12,6 +12,24 @@ just assemble-codex-package --variant codex-app-server
 just assemble-codex-package --target x86_64-unknown-linux-gnu
 ```
 
+For this fork's local macOS development, use `scripts/build-local-codex.sh` from
+any directory. It builds the current checkout's CLI and code-mode host using the
+existing native `dev-small` cache, then invokes this package builder. The completed
+package is published at `codex-rs/target/local-package`; a failed build, assembly,
+or version check leaves the previous package intact. Homebrew LLVM supplies
+`LIBCLANG_PATH` unless it is already set. Build jobs default to one, with V8 built
+from source and incremental compilation disabled; explicit environment values win.
+
+Pass `--clean-cache` to remove `dev-small/{deps,build,.fingerprint,incremental}`
+after successful packaging. This frees compilation caches, so the next build will
+take longer. Top-level executables and the completed package are retained. Do not
+run this script concurrently with other Cargo jobs in this checkout.
+
+Start the packaged CLI with `codex-rs/target/local-package/bin/codex`. To install
+and start its local daemon explicitly, append `app-server daemon start`; the build
+script itself does not change a running daemon. Keep the entire package directory,
+including its helpers and manifest, together.
+
 The builder creates a canonical Codex package directory:
 
 ```text
