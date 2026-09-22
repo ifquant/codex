@@ -1,6 +1,9 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
+use crate::agent::child_config::apply_spawn_agent_service_tier;
+use crate::agent::child_config::build_agent_resume_config;
+use crate::agent::child_config::build_agent_spawn_config;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
@@ -11,6 +14,8 @@ use crate::init_state_db;
 use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::update_selected_settings_for_test;
+use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
@@ -34,6 +39,7 @@ use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::items::TurnItem;
@@ -392,17 +398,20 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
     turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
     SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "fork_context_v2",
-                "agent_type": role_name,
-                "fork_turns": "all"
-            })),
-        ))
+        .handle(ToolInvocation {
+            source: crate::tools::context::ToolCallSource::DirectPlaintextMessage,
+            ..invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "task_name": "fork_context_v2",
+                    "agent_type": role_name,
+                    "fork_turns": "all"
+                })),
+            )
+        })
         .await
         .expect("fork_turns=all should apply agent_type overrides");
 }
@@ -821,18 +830,21 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
         let output = SpawnAgentHandlerV2::default()
-            .handle(invocation(
-                Arc::new(session),
-                Arc::new(turn),
-                "spawn_agent",
-                function_payload(json!({
-                    "message": "inspect this repo",
-                    "task_name": "partial_fork",
-                    "agent_type": role_name,
-                    "fork_turns": "1",
-                    "reasoning_effort": requested_effort
-                })),
-            ))
+            .handle(ToolInvocation {
+                source: crate::tools::context::ToolCallSource::DirectPlaintextMessage,
+                ..invocation(
+                    Arc::new(session),
+                    Arc::new(turn),
+                    "spawn_agent",
+                    function_payload(json!({
+                        "message": "inspect this repo",
+                        "task_name": "partial_fork",
+                        "agent_type": role_name,
+                        "fork_turns": "1",
+                        "reasoning_effort": requested_effort
+                    })),
+                )
+            })
             .await
             .expect("partial fork should allow agent_type overrides");
         let (content, _) = expect_text_output(output);
@@ -1231,7 +1243,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -1307,7 +1319,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -1472,7 +1484,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("researcher agent should spawn");
@@ -1492,7 +1504,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker agent should spawn");
@@ -2215,7 +2227,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         .await
         .expect("non-empty role config should apply");
     let TurnEnvironmentState::Ready(environment) = turn
-        .environments
+        .initial_environments
         .environments
         .first_mut()
         .expect("parent environment should exist")
@@ -4022,7 +4034,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_id() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -4089,7 +4101,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -4202,7 +4214,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
     let parent_session = parent.thread.session.clone();
     let parent_turn = parent_session.new_default_turn().await;
     let mut owner_config = parent_turn
-        .environments
+        .initial_environments
         .primary()
         .expect("parent should have an environment")
         .config()
@@ -4407,7 +4419,9 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
 #[test_case::test_case(false; "inactive_parent")]
 #[test_case::test_case(true; "active_parent")]
 #[tokio::test]
-async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool) {
+async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_values(
+    parent_enabled: bool,
+) {
     fn pick_allowed_sandbox_policy(
         permissions: &crate::config::Permissions,
         base: SandboxPolicy,
@@ -4432,10 +4446,18 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
     }
 
     let (_session, mut turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn, |settings| {
+        update_selected_settings_for_test(settings, |selected| {
+            selected.collaboration_mode.settings.model = "stale-turn-model".to_string();
+            selected.collaboration_mode.settings.reasoning_effort = Some(ReasoningEffort::Low);
+        });
+        Arc::make_mut(&mut settings.model_info).slug = "stale-turn-model".to_string();
+        settings.reasoning_summary = ReasoningSummary::Concise;
+    });
     let base_instructions = BaseInstructions {
         text: "base".to_string(),
         provenance: Some(BaseInstructionsProvenance::Model {
-            model: turn.model_info().slug.clone(),
+            model: "captured-step-model".to_string(),
         }),
     };
     turn.developer_instructions = Some("dev".to_string());
@@ -4467,7 +4489,7 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
         &file_system_sandbox_policy,
         network_sandbox_policy,
     );
-    turn.environments.environments.clear();
+    turn.initial_environments.environments.clear();
     Arc::make_mut(&mut turn.config)
         .permissions
         .set_permission_profile(permission_profile)
@@ -4497,13 +4519,30 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
         .get_or_insert_default()
         .guidance_message = Some("Parent model's resolved guidance.".to_string());
 
-    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+    let mut step_context = StepContext::for_test(Arc::new(turn));
+    let settings = Arc::make_mut(
+        &mut Arc::get_mut(&mut step_context)
+            .expect("step context should not be shared")
+            .settings,
+    );
+    update_selected_settings_for_test(settings, |selected| {
+        selected.collaboration_mode.settings.model = "captured-step-model".to_string();
+        selected.collaboration_mode.settings.reasoning_effort = None;
+    });
+    let model_info = Arc::make_mut(&mut settings.model_info);
+    model_info.slug = "captured-step-model".to_string();
+    model_info.default_reasoning_level = Some(ReasoningEffort::High);
+    settings.reasoning_summary = ReasoningSummary::Detailed;
+
+    let turn = step_context.turn.as_ref();
+    let config =
+        build_agent_spawn_config(&base_instructions, step_context.as_ref()).expect("spawn config");
     expected.base_instructions_provenance = base_instructions.provenance.clone();
     expected.base_instructions = Some(base_instructions.text);
-    expected.model = Some(turn.model_info().slug.clone());
+    expected.model = Some("captured-step-model".to_string());
     expected.model_provider = turn.provider.info().clone();
-    expected.model_reasoning_effort = turn.reasoning_effort().cloned();
-    expected.model_reasoning_summary = Some(turn.reasoning_summary());
+    expected.model_reasoning_effort = Some(ReasoningEffort::High);
+    expected.model_reasoning_summary = Some(ReasoningSummary::Detailed);
     expected.developer_instructions = turn.developer_instructions.clone();
     #[allow(deprecated)]
     {
@@ -4538,7 +4577,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
             PermissionProfile::read_only()
         };
     let TurnEnvironmentState::Ready(environment) = turn
-        .environments
+        .initial_environments
         .environments
         .first_mut()
         .expect("parent environment should exist")

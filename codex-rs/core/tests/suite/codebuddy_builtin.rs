@@ -22,11 +22,14 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-#[test_case::test_case(false; "v1")]
-#[test_case::test_case(true; "v2")]
+#[test_case::test_case(false, None; "v1")]
+#[test_case::test_case(true, None; "v2")]
+#[test_case::test_case(false, Some("max"); "v1_explicit_effort")]
+#[test_case::test_case(true, Some("max"); "v2_explicit_effort")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codebuddy_worker_routes_without_profile_or_role_config(
     use_v2: bool,
+    requested_effort: Option<&str>,
 ) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let parent = responses::start_mock_server().await;
@@ -98,6 +101,9 @@ async fn codebuddy_worker_routes_without_profile_or_role_config(
         "multi_agent_v1"
     };
     let mut spawn_args = json!({"agent_type":"codebuddy_worker", "message":"Reply worker done."});
+    if let Some(effort) = requested_effort {
+        spawn_args["reasoning_effort"] = json!(effort);
+    }
     if use_v2 {
         spawn_args["task_name"] = json!("worker");
         spawn_args["fork_turns"] = json!("none");
@@ -207,7 +213,10 @@ async fn codebuddy_worker_routes_without_profile_or_role_config(
     let body: serde_json::Value = requests[0].body_json()?;
     assert_eq!(
         (body["model"].clone(), body["reasoning_effort"].clone()),
-        (json!("deepseek-v4.1-flash"), json!("high"))
+        (
+            json!("deepseek-v4.1-flash"),
+            json!(requested_effort.unwrap_or("high"))
+        )
     );
     assert!(
         body["messages"].as_array().unwrap().iter().any(|message| {

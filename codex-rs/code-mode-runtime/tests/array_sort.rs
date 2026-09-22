@@ -3,8 +3,10 @@
 use codex_code_mode_runtime::ExecuteRequest;
 use codex_code_mode_runtime::FunctionCallOutputContentItem;
 use codex_code_mode_runtime::InProcessCodeModeSession;
+use codex_code_mode_runtime::NoopCodeModeSessionDelegate;
 use codex_code_mode_runtime::RuntimeResponse;
 use pretty_assertions::assert_eq;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn array_sort_preserves_element_kinds_after_comparator_mutation() {
@@ -13,10 +15,11 @@ async fn array_sort_preserves_element_kinds_after_comparator_mutation() {
     v8::V8::set_flags_from_string("--allow-natives-syntax --turbolev");
     let service = InProcessCodeModeSession::new();
     let started = service
-        .execute(ExecuteRequest {
-            tool_call_id: "call_1".to_string(),
-            enabled_tools: Vec::new(),
-            source: r#"
+        .execute(
+            ExecuteRequest {
+                tool_call_id: "call_1".to_string(),
+                enabled_tools: Vec::new(),
+                source: r#"
 function sortTopTier(values) {
     return values.sort(() => {
         values.fill(0);
@@ -53,10 +56,12 @@ prepare(sortMaglev);
 check(sortMaglev);
 text(JSON.stringify([3, 1, 2].sort((a, b) => a - b)));
 "#
-            .to_string(),
-            yield_time_ms: None,
-            max_output_tokens: None,
-        })
+                .to_string(),
+                yield_time_ms: None,
+                max_output_tokens: None,
+            },
+            Arc::new(NoopCodeModeSessionDelegate),
+        )
         .await
         .expect("start code-mode cell");
     let cell_id = started.cell_id.clone();

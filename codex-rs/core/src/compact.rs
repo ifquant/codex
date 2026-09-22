@@ -13,7 +13,6 @@ use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
-use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
@@ -48,7 +47,6 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
@@ -92,6 +90,7 @@ pub(crate) struct CompactedHistoryMetadata {
     pub(crate) window_ids: AutoCompactWindowIds,
     pub(crate) compaction_response_id: Option<String>,
     pub(crate) compaction_model_hash: Option<String>,
+    pub(crate) reviewer_compaction_hash: Option<String>,
 }
 
 pub(crate) async fn build_compaction_initial_context(
@@ -153,14 +152,7 @@ pub(crate) async fn run_compact_task(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
 ) -> CodexResult<()> {
-    let start_event = EventMsg::TurnStarted(TurnStartedEvent {
-        turn_id: turn_context.sub_id.clone(),
-        trace_id: turn_context.trace_id.clone(),
-        started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
-        model_context_window: turn_context.model_context_window(),
-        collaboration_mode_kind: turn_context.mode(),
-    });
-    sess.send_event(&turn_context, start_event).await;
+    sess.emit_turn_started(&turn_context).await;
     run_compact_task_inner(
         sess.clone(),
         turn_context,
@@ -242,6 +234,20 @@ async fn run_compact_task_inner(
             CompactionAnalyticsDetails::default(),
         )
         .await;
+    if let Err(err) = &result
+        && !matches!(phase, CompactionPhase::PostTurn)
+        && !matches!(
+            err.details(),
+            CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
+        )
+    {
+        sess.track_turn_codex_error(turn_context.as_ref(), err);
+        // Pre-turn failures are reported after preserving the incoming prompt.
+        if !matches!(phase, CompactionPhase::PreTurn) {
+            let event = EventMsg::Error(err.to_error_event(/*message_prefix*/ None));
+            sess.send_event(&turn_context, event).await;
+        }
+    }
     result.map(|_| ())
 }
 
@@ -266,40 +272,39 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
+    // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
+    // request tracking) survives retries within this compact turn.
     let mut client_session = sess.services.model_client.new_session();
-    // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
-    // request tracking)
-    // survives retries within this compact turn.
-    let responses_metadata = sess
-        .responses_metadata(
-            turn_context.as_ref(),
-            CodexResponsesRequestKind::Compaction(compaction_metadata),
-        )
-        .await;
-
-    let (compaction_response_id, summary_suffix) = loop {
+    let compaction_response = loop {
         // Clone is required because of the loop
-        let turn_input = history
+        let mut turn_input = history
             .clone()
             .for_prompt(&turn_context.model_info().input_modalities);
+        sess.services
+            .executed_tool_calls
+            .attach_to_compaction_prompt(&mut turn_input);
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
             base_instructions: sess.get_prompt_base_instructions().await,
             ..Default::default()
         };
+        let responses_metadata = sess
+            .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
+            .await;
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),
             &mut client_session,
             &responses_metadata,
             &prompt,
+            compaction_metadata.phase(),
         )
         .await;
 
         match attempt_result {
-            Ok(response_id) => {
-                break response_id;
+            Ok(response) => {
+                break response;
             }
             Err(err)
                 if matches!(
@@ -310,12 +315,6 @@ async fn run_compact_task_inner_impl(
                 return Err(err);
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                // Pre-turn failures are reported after preserving the incoming prompt.
-                if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
-                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                    sess.send_event(&turn_context, event).await;
-                }
                 return Err(e);
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
@@ -329,11 +328,6 @@ async fn run_compact_task_inner_impl(
                     continue;
                 }
                 sess.set_total_tokens_full(turn_context.as_ref()).await;
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
-                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                    sess.send_event(&turn_context, event).await;
-                }
                 return Err(e);
             }
             Err(e) => {
@@ -349,11 +343,6 @@ async fn run_compact_task_inner_impl(
                     tokio::time::sleep(delay).await;
                     continue;
                 } else {
-                    sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                    if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
-                        let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                        sess.send_event(&turn_context, event).await;
-                    }
                     return Err(e);
                 }
             }
@@ -362,6 +351,8 @@ async fn run_compact_task_inner_impl(
 
     let history_items = original_history.annotated_items();
     let is_codebuddy = turn_context.provider.info().wire_api == WireApi::CodebuddyChat;
+    let summary_suffix = get_last_assistant_message_from_turn(compaction_response.output.iter())
+        .expect("completed compaction has a validated summary");
     let mut summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     if is_codebuddy && let Ok(Some(path)) = sess.current_rollout_path().await {
         summary_text.push_str(&format!("\n\nOriginal transcript: {}. Read relevant records here if exact earlier tool evidence is needed.", path.display()));
@@ -408,8 +399,9 @@ async fn run_compact_task_inner_impl(
             message: summary_text,
             window_number,
             window_ids,
-            compaction_response_id: Some(compaction_response_id),
+            compaction_response_id: Some(compaction_response.response_id),
             compaction_model_hash: turn_context.model_info().comp_hash.clone(),
+            reviewer_compaction_hash: None,
         },
     )
     .await;
@@ -775,13 +767,19 @@ fn build_compacted_history_with_limit(
     history
 }
 
+struct CompactionResponse {
+    response_id: String,
+    output: Vec<ResponseItem>,
+}
+
 async fn drain_to_completed(
     sess: &Session,
     turn_context: &TurnContext,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
-) -> CodexResult<(String, String)> {
+    phase: CompactionPhase,
+) -> CodexResult<CompactionResponse> {
     let mut stream = client_session
         .stream(
             prompt,
@@ -800,8 +798,7 @@ async fn drain_to_completed(
             &InferenceTraceContext::disabled(),
         )
         .await?;
-    // Keep tentative summaries out of live history and the rollout until completion.
-    let mut output_items = Vec::new();
+    let mut output = Vec::new();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -811,7 +808,8 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                output_items.push(item);
+                // Commit tentative summaries only after successful completion and validation.
+                output.push(item);
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -843,21 +841,27 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
-                let summary = get_last_assistant_message_from_turn(output_items.iter())
+                get_last_assistant_message_from_turn(output.iter())
                     .filter(|summary| !summary.trim().is_empty())
                     .ok_or_else(|| {
-                        CodexErr::Fatal(
-                            "Compaction returned an empty summary; original history was preserved"
-                                .into(),
-                        )
+                        if matches!(phase, CompactionPhase::PostTurn) {
+                            CodexErr::Stream("Post-turn compaction completed without an assistant summary".into())
+                        } else {
+                            CodexErr::Fatal("Compaction returned an empty summary; original history was preserved".into())
+                        }
                     })?;
-                sess.record_conversation_items(
-                    turn_context,
-                    turn_context.model_info(),
-                    &output_items,
-                )
-                .await;
-                return Ok((response_id, summary));
+                if !matches!(phase, CompactionPhase::PostTurn) {
+                    sess.record_conversation_items(
+                        turn_context,
+                        turn_context.model_info(),
+                        &output,
+                    )
+                    .await;
+                }
+                return Ok(CompactionResponse {
+                    response_id,
+                    output,
+                });
             }
             Ok(_) => continue,
             Err(e) => return Err(e),

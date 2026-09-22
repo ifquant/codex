@@ -7,6 +7,7 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_core::config::RolloutBudgetConfig;
+use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ContentItem;
@@ -17,6 +18,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
+use core_test_support::ThreadIdle;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -30,7 +32,10 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use test_case::test_case;
+
+use super::image_rollout::RecordingFileAttachmentStore;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(160_000, &[0, 0]; "complete_instructions_fit")]
@@ -46,7 +51,10 @@ async fn review_preserves_user_instructions_until_request_budgeting(
         "Guardian approval actions require host-native paths"
     );
     let server = responses::start_mock_server().await;
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
         .with_model_info_override("gpt-5.6-luna", move |model| {
             model.context_window = Some(window);
         })
@@ -107,6 +115,8 @@ async fn review_preserves_user_instructions_until_request_budgeting(
         "{padding}Run the requested echo command. You may edit scratch files only.{padding}"
     );
     test.submit_text_turn(&initial).await?;
+    // TurnComplete precedes active-turn cleanup; wait before injecting follow-up history.
+    ThreadIdle::wait(&test.codex).await;
     // This whole message exceeds the old transcript allowance. A following
     // restriction must still reach the reviewer, with the original source order.
     let followup = format!("{padding}{padding}Keep all files private.{padding}{padding}");
@@ -133,6 +143,7 @@ async fn review_preserves_user_instructions_until_request_budgeting(
             ])
             .await?;
         test.submit_text_turn(restriction).await?;
+        ThreadIdle::wait(&test.codex).await;
     }
     let (compact_requests, requests): (Vec<_>, Vec<_>) = responses
         .requests()
@@ -198,6 +209,7 @@ async fn review_preserves_user_instructions_until_request_budgeting(
 enum ReviewerResponse {
     Decision,
     ToolContinuation,
+    FileImageContinuation,
     UncompactableContinuation,
     CompactionError,
     NextReview,
@@ -206,6 +218,7 @@ enum ReviewerResponse {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(1, ReviewerResponse::Decision; "required_context_fails_closed")]
 #[test_case(4_500, ReviewerResponse::ToolContinuation; "oversized_tool_continuation_compacts")]
+#[test_case(4_500, ReviewerResponse::FileImageContinuation; "uploaded_original_image_history_compacts")]
 #[test_case(4_500, ReviewerResponse::UncompactableContinuation; "ineffective_compaction_fails_closed")]
 #[test_case(4_500, ReviewerResponse::CompactionError; "compaction_service_error_does_not_request_user_approval")]
 #[test_case(6_000, ReviewerResponse::NextReview; "incoming_review_compacts_existing_history")]
@@ -231,6 +244,10 @@ async fn review_respects_complete_context_budget(
         )
         .with_model_info_override("gpt-5.6-luna", move |model| {
             model.context_window = Some(window);
+            if matches!(reviewer_response, ReviewerResponse::FileImageContinuation) {
+                model.supports_image_detail_original = true;
+                model.use_responses_lite = false;
+            }
             model
                 .model_messages
                 .as_mut()
@@ -268,11 +285,16 @@ async fn review_respects_complete_context_budget(
     if matches!(
         reviewer_response,
         ReviewerResponse::ToolContinuation
+            | ReviewerResponse::FileImageContinuation
             | ReviewerResponse::UncompactableContinuation
             | ReviewerResponse::CompactionError
     ) {
         builder = builder
             .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?);
+    }
+    let image_store = Arc::new(RecordingFileAttachmentStore::default());
+    if matches!(reviewer_response, ReviewerResponse::FileImageContinuation) {
+        builder = builder.with_image_store(image_store.clone());
     }
     let test = builder.build_with_auto_env(&server).await?;
     let command = json!({"cmd": "echo guardian-budget-test", "sandbox_permissions": "require_escalated", "justification": "Run the requested command."}).to_string();
@@ -321,12 +343,22 @@ async fn review_respects_complete_context_budget(
                         "exec",
                         "text('inspection-output'.repeat(600));",
                     ),
+                    // A tiny inline image fits before upload. Its opaque original-detail file
+                    // reference must reserve 10k tokens in reviewer history and force compaction.
+                    ReviewerResponse::FileImageContinuation => ev_custom_tool_call(
+                        "reviewer-inspect",
+                        "exec",
+                        r#"image("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "original");"#,
+                    ),
                 },
                 ev_completed("review"),
             ]),
         );
     }
-    if matches!(reviewer_response, ReviewerResponse::ToolContinuation) {
+    if matches!(
+        reviewer_response,
+        ReviewerResponse::ToolContinuation | ReviewerResponse::FileImageContinuation
+    ) {
         events.insert(
             /*index*/ 2,
             sse(vec![
@@ -424,18 +456,38 @@ async fn review_respects_complete_context_budget(
             "expected required-evidence budget rejection: {output}"
         );
     } else {
-        let recovered = matches!(reviewer_response, ReviewerResponse::ToolContinuation);
+        let recovered = matches!(
+            reviewer_response,
+            ReviewerResponse::ToolContinuation | ReviewerResponse::FileImageContinuation
+        );
         assert_eq!(requests.len(), if recovered { 4 } else { 3 });
         assert_eq!(guardian_requests.len(), if recovered { 2 } else { 1 });
         if recovered {
             assert_eq!(compact_requests.len(), 1);
             let compact = &compact_requests[0];
-            assert!(
-                compact
-                    .body_json()
-                    .to_string()
-                    .contains("inspection-output")
-            );
+            if matches!(reviewer_response, ReviewerResponse::FileImageContinuation) {
+                assert_eq!(
+                    image_store
+                        .uploads
+                        .lock()
+                        .expect("image upload tracker lock is not poisoned")
+                        .len(),
+                    1
+                );
+                // The file reservation also protects the compaction request itself: an output
+                // larger than its window is replaced before the summary request is sent.
+                assert_eq!(
+                    compact.custom_tool_call_output("reviewer-inspect")["output"],
+                    "Output exceeded the available model context and was truncated"
+                );
+            } else {
+                assert!(
+                    compact
+                        .body_json()
+                        .to_string()
+                        .contains("inspection-output")
+                );
+            }
             let recovered = guardian_requests[1].body_json();
             assert!(
                 recovered["input"]

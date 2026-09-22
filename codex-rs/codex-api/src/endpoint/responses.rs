@@ -29,10 +29,6 @@ pub enum ResponsesEndpoint {
     /// Regular user-owned model inference.
     #[default]
     Responses,
-    /// Full Guardian approval-review agent inference.
-    Guardian,
-    /// Lightweight asynchronous Guardian risk classification.
-    GuardianClassifier,
     /// CodeBuddy Chat Completions, adapted to the internal Responses event contract.
     CodebuddyChat,
 }
@@ -42,8 +38,6 @@ impl ResponsesEndpoint {
     pub const fn path(self) -> &'static str {
         match self {
             Self::Responses => "/responses",
-            Self::Guardian => "/guardian",
-            Self::GuardianClassifier => "/guardian-classifier",
             Self::CodebuddyChat => "/chat/completions",
         }
     }
@@ -51,8 +45,8 @@ impl ResponsesEndpoint {
 
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
-    sse_telemetry: Option<Arc<dyn SseTelemetry>>,
     endpoint: ResponsesEndpoint,
+    sse_telemetry: Option<Arc<dyn SseTelemetry>>,
 }
 
 #[derive(Default)]
@@ -69,12 +63,11 @@ impl<T: HttpTransport> ResponsesClient<T> {
     pub fn new(transport: T, provider: Provider, auth: SharedAuthProvider) -> Self {
         Self {
             session: EndpointSession::new(transport, provider, auth),
-            sse_telemetry: None,
             endpoint: ResponsesEndpoint::Responses,
+            sse_telemetry: None,
         }
     }
 
-    /// Selects a Responses-compatible backend route for subsequent requests.
     pub fn with_endpoint(mut self, endpoint: ResponsesEndpoint) -> Self {
         self.endpoint = endpoint;
         self
@@ -87,8 +80,8 @@ impl<T: HttpTransport> ResponsesClient<T> {
     ) -> Self {
         Self {
             session: self.session.with_request_telemetry(request),
-            sse_telemetry: sse,
             endpoint: self.endpoint,
+            sse_telemetry: sse,
         }
     }
 
@@ -191,7 +184,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .session
             .stream_encoded_json_with(
                 Method::POST,
-                self.endpoint.path(),
+                "/responses",
                 extra_headers,
                 Some(body),
                 |req| {

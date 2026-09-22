@@ -3,11 +3,11 @@ use super::LaunchDesktop;
 use super::PRIVATE_DESKTOP_PREFIX;
 use super::shared_private_desktop_for_user;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+use crate::runtime_ownership::current_setup_user;
 use crate::setup::SandboxSetupRequest;
 use crate::setup::SetupRootOverrides;
 use crate::spawn_prep::legacy_session_capability_roots;
 use crate::spawn_prep::prepare_legacy_session_security;
-use crate::winutil::current_account_name;
 use anyhow::Result;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -57,7 +57,7 @@ fn shared_desktop_survives_launch_handles_and_concurrent_requests() -> Result<()
         deny_read_paths: Default::default(),
         deny_write_paths: Default::default(),
     };
-    let account = current_account_name()?;
+    let account = current_setup_user()?;
     let names = std::thread::scope(|scope| {
         let workers = [(); 4].map(|_| {
             let account = &account;
@@ -98,7 +98,7 @@ fn shared_desktop_reuses_only_equivalent_permissions() -> Result<()> {
     let codex_home = temp.path().join("codex-home");
     let permissions = workspace_permissions(&workspace)?;
     let env = HashMap::new();
-    let account = current_account_name()?;
+    let account = current_setup_user()?;
     let sids = ["S-1-5-21-10-20-30-40".into(), "S-1-5-21-10-20-30-41".into()];
     let proxy_sid = "S-1-5-21-50-60-70-80";
     let overrides = || SetupRootOverrides {
@@ -195,7 +195,6 @@ fn legacy_desktop_reuses_only_equivalent_permissions() -> Result<()> {
     let _token = unsafe { OwnedHandle::from_raw_handle(security.h_token as *mut _) };
     let desktop = |deny_write_paths| {
         LaunchDesktop::prepare_legacy(
-            /*use_private_desktop*/ true,
             &permissions,
             &workspace,
             &env,

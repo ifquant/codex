@@ -78,7 +78,12 @@ pub struct McpServerStatus {
     /// Current thread-runtime connection state; null when unavailable or the configuration changed.
     pub runtime_status: Option<McpServerConnectionStatus>,
     pub plugin_id: Option<String>,
+    /// HTTP origin of the effective configured endpoint, including plugin servers.
+    /// Excludes credentials, path, query, and fragment; null for non-HTTP transports.
+    pub http_origin: Option<String>,
     pub server_info: Option<McpServerInfo>,
+    /// Capabilities advertised by the initialized MCP server; null when unavailable.
+    pub server_capabilities: Option<serde_json::Value>,
     pub tools: std::collections::HashMap<String, McpTool>,
     /// Tool discovery failed and no catalog was returned.
     /// Null when a catalog is returned, including cached or empty catalogs.
@@ -756,6 +761,9 @@ pub enum McpServerElicitationRequest {
     #[serde(rename = "openai/userVerification", rename_all = "camelCase")]
     #[ts(rename = "openai/userVerification", rename_all = "camelCase")]
     UserVerification {
+        #[serde(rename = "_meta")]
+        #[ts(rename = "_meta")]
+        meta: Option<JsonValue>,
         title: String,
         description: String,
         challenge: String,
@@ -806,10 +814,12 @@ impl TryFrom<CoreElicitationRequest> for McpServerElicitationRequest {
     fn try_from(value: CoreElicitationRequest) -> Result<Self, Self::Error> {
         match value {
             CoreElicitationRequest::UserVerification {
+                meta,
                 title,
                 description,
                 challenge,
             } => Ok(Self::UserVerification {
+                meta,
                 title,
                 description,
                 challenge,

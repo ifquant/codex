@@ -1,4 +1,5 @@
-//! Proxy-aware WebSocket connection setup shared by Codex API clients.
+//! Proxy-aware WebSocket connection setup shared by Codex API clients, reusing the HTTP factory's
+//! ChatGPT cookie store for secure handshakes.
 
 mod dialer;
 
@@ -27,6 +28,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::http::Uri;
+use tokio_tungstenite::tungstenite::http::header::COOKIE;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// Connects WebSockets using the outbound proxy policy resolved by application configuration.
@@ -41,11 +43,13 @@ pub struct WebSocketConnector {
     tcp_nodelay: TcpNodelay,
 }
 
-/// Selects whether WebSocket TLS follows Codex custom-CA policy or Tungstenite defaults.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Selects the TLS configuration used for WebSocket connections.
+#[derive(Clone)]
 pub enum WebSocketTlsMode {
     /// Build an explicit TLS configuration from native roots and configured Codex custom CAs.
     ExplicitCodexTls,
+    /// Use an existing Rustls configuration.
+    Rustls(Arc<ClientConfig>),
     /// Let Tungstenite build its default TLS configuration when the target requires TLS.
     TungsteniteDefault,
 }
@@ -64,10 +68,10 @@ impl WebSocketConnector {
         Self::new_with_tls_mode(http_client_factory, WebSocketTlsMode::ExplicitCodexTls)
     }
 
-    /// Creates a connector with explicit Codex TLS or the transport's existing TLS defaults.
+    /// Creates a connector with the selected WebSocket TLS configuration.
     ///
-    /// HTTPS proxy connections still build Codex TLS configuration when they establish their
-    /// proxy tunnel; default-mode target connections otherwise remain entirely with Tungstenite.
+    /// With [`WebSocketTlsMode::TungsteniteDefault`], HTTPS proxy connections still build Codex
+    /// TLS configuration when they establish their proxy tunnel.
     pub fn new_with_tls_mode(
         http_client_factory: &HttpClientFactory,
         tls_mode: WebSocketTlsMode,
@@ -76,6 +80,7 @@ impl WebSocketConnector {
             WebSocketTlsMode::ExplicitCodexTls => {
                 Some(build_rustls_client_config_with_custom_ca()?)
             }
+            WebSocketTlsMode::Rustls(config) => Some(config),
             WebSocketTlsMode::TungsteniteDefault => None,
         };
         Ok(Self {
@@ -133,12 +138,18 @@ impl WebSocketConnector {
 
     async fn connect_with_route(
         &self,
-        request: Request,
+        mut request: Request,
         config: WebSocketConfig,
         proxy_route: OutboundProxyRoute,
         loopback_direct: bool,
     ) -> Result<(WebSocketConnection, Response), WebSocketError> {
-        let (inner, response) = dialer::connect(
+        let uri = request.uri().clone();
+        if !request.headers().contains_key(COOKIE)
+            && let Some(cookies) = self.http_client_factory.chatgpt_cookie_header(&uri)
+        {
+            request.headers_mut().insert(COOKIE, cookies);
+        }
+        let result = dialer::connect(
             request,
             config,
             self.tls_config.clone(),
@@ -147,7 +158,18 @@ impl WebSocketConnector {
             loopback_direct,
         )
         .boxed()
-        .await?;
+        .await;
+        // Like HTTP responses, rejected upgrades can also refresh infrastructure cookies.
+        match &result {
+            Ok((_, response)) => self
+                .http_client_factory
+                .store_chatgpt_response_cookies(&uri, response.headers()),
+            Err(WebSocketError::Http(response)) => self
+                .http_client_factory
+                .store_chatgpt_response_cookies(&uri, response.headers()),
+            Err(_) => {}
+        }
+        let (inner, response) = result?;
         Ok((WebSocketConnection { inner }, response))
     }
 }
@@ -239,3 +261,7 @@ impl<T> AsyncIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cookie_tests.rs"]
+mod cookie_tests;
