@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 expression: rendered
 ---
 ╭─────────────────────────────────────────────────╮
-│ ✨ Update available! 0.155.0-alpha.2.6 -> 9.9.9 │
+│ ✨ Update available! 0.156.0-alpha.2.6 -> 9.9.9 │
 │ Run vp install -g @openai/codex to update.      │
 │                                                 │
 │ See full release notes:                         │
