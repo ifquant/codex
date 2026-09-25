@@ -182,7 +182,7 @@ impl ToolRouter {
     }
 
     // Answers if the tool plan lets the model invoke the tool directly, through code mode, or deferred tool search.
-    fn exposes_tool(&self, name: &ToolName) -> bool {
+    pub(super) fn exposes_tool(&self, name: &ToolName) -> bool {
         let name = name.clone().with_default_namespace();
         if self
             .code_mode_tool_names
@@ -217,6 +217,10 @@ impl ToolRouter {
 
     pub(crate) fn deferred_tool_namespaces(&self) -> BTreeMap<String, String> {
         self.registry.deferred_tool_namespaces()
+    }
+
+    pub(crate) fn mcp_namespaces(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.registry.mcp_namespaces()
     }
 
     #[cfg(test)]

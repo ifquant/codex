@@ -1,4 +1,3 @@
-use crate::context::GuardianContextMode;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -349,20 +348,25 @@ async fn run_compact_task_inner_impl(
         }
     };
 
-    let history_items = original_history.annotated_items();
+    let history_snapshot = sess.clone_history().await;
+    let history_items = history_snapshot.annotated_items();
     let is_codebuddy = turn_context.provider.info().wire_api == WireApi::CodebuddyChat;
-    let summary_suffix = get_last_assistant_message_from_turn(compaction_response.output.iter())
-        .expect("completed compaction has a validated summary");
+    let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
+        get_last_assistant_message_from_turn(compaction_response.output.iter())
+            .filter(|summary| !summary.trim().is_empty())
+            .ok_or_else(|| {
+                CodexErr::Stream(
+                    "Post-turn compaction completed without an assistant summary".to_string(),
+                )
+            })?
+    } else {
+        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
+    };
     let mut summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     if is_codebuddy && let Ok(Some(path)) = sess.current_rollout_path().await {
         summary_text.push_str(&format!("\n\nOriginal transcript: {}. Read relevant records here if exact earlier tool evidence is needed.", path.display()));
     }
-    let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
-        CompactedMessageIdentity::Preserve
-    } else {
-        CompactedMessageIdentity::Regenerate
-    };
-    let user_messages = collect_annotated_user_messages(history_items, identity);
+    let user_messages = collect_annotated_user_messages(history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     if is_codebuddy {
@@ -558,24 +562,12 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUser
         .collect()
 }
 
-pub(crate) enum CompactedMessageIdentity {
-    Preserve,
-    Regenerate,
-}
-
 pub(crate) fn collect_annotated_user_messages(
     items: &[ResponseItemEnvelope],
-    identity: CompactedMessageIdentity,
 ) -> Vec<CompactedUserMessage> {
     items
         .iter()
         .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.clone()))
-        .map(|mut message| {
-            if matches!(identity, CompactedMessageIdentity::Regenerate) {
-                message.id = None;
-            }
-            message
-        })
         .collect()
 }
 
@@ -808,8 +800,25 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                // Commit tentative summaries only after successful completion and validation.
-                output.push(item);
+                if matches!(phase, CompactionPhase::PostTurn)
+                    || turn_context.provider.info().wire_api == WireApi::CodebuddyChat
+                {
+                    // Keep post-turn and CodeBuddy summaries tentative until completion.
+                    output.push(item);
+                } else {
+                    sess.record_annotated_conversation_items(
+                        turn_context,
+                        turn_context.model_info(),
+                        vec![ResponseItemEnvelope {
+                            item,
+                            metadata: Some(CodexHarnessMetadata {
+                                compaction_output: true,
+                                ..Default::default()
+                            }),
+                        }],
+                    )
+                    .await;
+                }
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -841,15 +850,25 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
-                get_last_assistant_message_from_turn(output.iter())
-                    .filter(|summary| !summary.trim().is_empty())
-                    .ok_or_else(|| {
-                        if matches!(phase, CompactionPhase::PostTurn) {
-                            CodexErr::Stream("Post-turn compaction completed without an assistant summary".into())
-                        } else {
-                            CodexErr::Fatal("Compaction returned an empty summary; original history was preserved".into())
-                        }
-                    })?;
+                if matches!(phase, CompactionPhase::PostTurn)
+                    || turn_context.provider.info().wire_api == WireApi::CodebuddyChat
+                {
+                    get_last_assistant_message_from_turn(output.iter())
+                        .filter(|summary| !summary.trim().is_empty())
+                        .ok_or_else(|| {
+                            if matches!(phase, CompactionPhase::PostTurn) {
+                                CodexErr::Stream(
+                                    "Post-turn compaction completed without an assistant summary"
+                                        .into(),
+                                )
+                            } else {
+                                CodexErr::Fatal(
+                                    "Compaction returned an empty summary; original history was preserved"
+                                        .into(),
+                                )
+                            }
+                        })?;
+                }
                 if !matches!(phase, CompactionPhase::PostTurn) {
                     sess.record_conversation_items(
                         turn_context,

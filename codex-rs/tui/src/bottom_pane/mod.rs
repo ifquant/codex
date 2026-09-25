@@ -510,6 +510,9 @@ impl BottomPane {
         if let Some(questions) = &mut self.questions {
             questions.set_keymap(keymap);
         }
+        // Show the first shortcut from the same keymap ChatWidget uses to handle queued edits.
+        self.pending_input_preview
+            .set_edit_binding(keymap.primary_hint(KeymapContext::Chat, "edit_queued_message"));
         let interrupt_binding = keymap.primary_hint(KeymapContext::Chat, "interrupt_turn");
         self.pending_input_preview
             .set_interrupt_binding(interrupt_binding);
@@ -602,19 +605,6 @@ impl BottomPane {
 
     pub(crate) fn set_parent_owned_thread(&mut self) {
         self.composer.set_parent_owned_thread();
-        self.request_redraw();
-    }
-
-    /// Update the key hint shown next to queued messages so it matches the
-    /// binding that `ChatWidget` actually listens for.
-    pub(crate) fn set_queued_message_edit_binding(
-        &mut self,
-        binding: Option<crate::key_hint::ShortcutHint>,
-    ) {
-        self.pending_input_preview.set_edit_binding(binding);
-        if let Some(questions) = &mut self.questions {
-            questions.next_hint = binding;
-        }
         self.request_redraw();
     }
 
@@ -1075,13 +1065,15 @@ impl BottomPane {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
-        self.composer.set_text_content_with_mention_bindings(
-            text,
-            text_elements,
-            local_image_paths,
-            mention_bindings,
-        );
-        self.composer.move_cursor_to_end();
+        self.composer.edit_stored_draft(|composer| {
+            composer.set_text_content_with_mention_bindings(
+                text,
+                text_elements,
+                local_image_paths,
+                mention_bindings,
+            );
+            composer.move_cursor_to_end();
+        });
         self.request_redraw();
     }
 
@@ -1150,7 +1142,7 @@ impl BottomPane {
     }
 
     pub(crate) fn composer_pending_pastes(&self) -> Vec<(String, String)> {
-        self.composer.pending_pastes()
+        self.composer.draft_snapshot().pending_pastes
     }
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
@@ -1173,7 +1165,8 @@ impl BottomPane {
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
-        self.composer.set_remote_image_urls(urls);
+        self.composer
+            .edit_stored_draft(|composer| composer.set_remote_image_urls(urls));
         self.request_redraw();
     }
 
@@ -1188,7 +1181,8 @@ impl BottomPane {
     }
 
     pub(crate) fn set_composer_pending_pastes(&mut self, pending_pastes: Vec<(String, String)>) {
-        self.composer.set_pending_pastes(pending_pastes);
+        self.composer
+            .edit_stored_draft(|composer| composer.set_pending_pastes(pending_pastes));
         self.request_redraw();
     }
 
@@ -1278,6 +1272,30 @@ impl BottomPane {
     }
 
     // esc_backtrack_hint_visible removed; hints are controlled internally.
+
+    pub(crate) fn set_prompt_suggestion(
+        &mut self,
+        request: crate::prompt_suggestions::SuggestionRequest,
+    ) {
+        self.composer.set_prompt_suggestion(request);
+    }
+
+    pub(crate) fn has_prompt_suggestion(&self) -> bool {
+        self.composer.has_prompt_suggestion()
+    }
+
+    pub(crate) fn clear_prompt_suggestion(&mut self) {
+        self.composer.clear_prompt_suggestion();
+    }
+
+    pub(crate) fn apply_prompt_suggestion(
+        &mut self,
+        request: &crate::prompt_suggestions::SuggestionRequest,
+        text: Option<String>,
+    ) {
+        self.composer.apply_prompt_suggestion(request, text);
+        self.request_redraw();
+    }
 
     pub fn set_task_running(&mut self, running: bool) {
         let was_running = self.is_task_running;
@@ -1751,6 +1769,15 @@ impl BottomPane {
         self.composer.end_mouse_drag();
     }
 
+    pub(crate) fn finish_composer_copy(
+        &mut self,
+        completion: &(u64, crate::clipboard_copy::worker::CopyResult),
+        visible: bool,
+    ) -> Option<usize> {
+        let current = visible && !self.has_active_view();
+        self.composer.finish_copy(completion, current)
+    }
+
     pub(crate) fn copy_composer_selection(
         &mut self,
         event: &crate::tui::TuiEvent,
@@ -1874,6 +1901,20 @@ impl BottomPane {
         if let Some(tool_suggestion) = request.tool_suggestion()
             && let Some(install_url) = tool_suggestion.install_url.clone()
         {
+            let Some(install_url) = app_link_view::validate_external_url(
+                &install_url,
+                /*require_chatgpt_host*/ false,
+            ) else {
+                self.app_event_tx.resolve_elicitation(
+                    request.thread_id(),
+                    request.server_name().to_string(),
+                    request.request_id().clone(),
+                    codex_app_server_protocol::McpServerElicitationAction::Decline,
+                    /*content*/ None,
+                    /*meta*/ None,
+                );
+                return;
+            };
             let suggestion_type = match tool_suggestion.suggest_type {
                 mcp_server_elicitation::ToolSuggestionType::Install => {
                     AppLinkSuggestionType::Install
@@ -1903,7 +1944,7 @@ impl BottomPane {
                             "external actions use URL mode elicitation, not tool suggestion forms"
                         ),
                     },
-                    url: install_url,
+                    url: install_url.into(),
                     is_installed,
                     is_enabled: false,
                     suggest_reason: Some(tool_suggestion.suggest_reason.clone()),
@@ -2193,8 +2234,10 @@ impl BottomPane {
                 },
             );
             let question_editor = self.questions.as_ref().filter(|q| q.expanded);
+            // An empty shared gap already separates activity from the composer.
             if !has_inline_previews
                 && has_status_or_footer
+                && options.composer_gap.is_none_or(|gap| gap.needs_separator)
                 && question_editor.is_none_or(|q| q.unanswered_count() > 1)
             {
                 flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
@@ -2564,7 +2607,9 @@ mod tests {
             .expect("valid optional banner");
             let (tx, mut rx) = unbounded_channel();
             let mut pane = test_pane(AppEventSender::new(tx));
-            pane.set_inline_banner(Some(banner.actionable_banner()));
+            pane.set_inline_banner(Some(
+                banner.actionable_banner(crate::clock_format::ClockFormat::TwentyFourHour),
+            ));
             let width = 44;
             let area = Rect::new(
                 /*x*/ 0,

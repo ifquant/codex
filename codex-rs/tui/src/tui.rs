@@ -86,6 +86,7 @@ mod startup_tests;
 mod terminal_stderr;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod tmux;
 #[cfg(any(windows, test))]
 mod windows_console;
 
@@ -98,6 +99,7 @@ pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
 pub(crate) struct InitializedTerminal {
     pub(crate) terminal: Terminal,
     pub(crate) enhanced_keys_supported: bool,
+    pub(crate) terminal_app_over_ssh: bool,
     pub(crate) stderr_guard: terminal_stderr::TerminalStderrGuard,
 }
 
@@ -473,6 +475,7 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
                     cursor_position: None,
                     default_colors: None,
                     keyboard_enhancement_supported: None,
+                    terminal_app_over_ssh: None,
                 }
             }
         }
@@ -515,6 +518,12 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     let initialized_terminal = InitializedTerminal {
         terminal: tui,
         enhanced_keys_supported,
+        #[cfg(unix)]
+        terminal_app_over_ssh: startup_probe
+            .terminal_app_over_ssh
+            .unwrap_or(/*default*/ false),
+        #[cfg(not(unix))]
+        terminal_app_over_ssh: false,
         stderr_guard,
     };
     restore_guard.active = false;
@@ -629,6 +638,8 @@ pub struct Tui {
     // True when terminal/tab is focused; updated internally from crossterm events
     terminal_focused: Arc<AtomicBool>,
     enhanced_keys_supported: bool,
+    // Cache the startup result so later configuration loads use the same terminal policy.
+    pub(crate) terminal_app_over_ssh: bool,
     notification_backend: Option<DesktopNotificationBackend>,
     notification_condition: NotificationCondition,
     scrollback: ScrollbackStrategy,
@@ -637,8 +648,8 @@ pub struct Tui {
     // Keep the alternate screen alive when an overlay closes.
     owned_screen: bool,
     overlay_input: OverlayInput,
-    // Selection copies survive closing a transcript overlay or startup session picker.
-    selection_clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    // Copies and native ownership survive closing an overlay or startup picker.
+    pub(crate) clipboard: crate::clipboard_copy::worker::ClipboardWorker,
     // Keeps unmanaged process stderr writes out of the inline viewport.
     _stderr_guard: terminal_stderr::TerminalStderrGuard,
 }
@@ -700,13 +711,14 @@ impl Tui {
             alt_screen_active: Arc::new(AtomicBool::new(false)),
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
+            terminal_app_over_ssh: false,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
             notification_condition: NotificationCondition::default(),
             scrollback,
             alt_screen_enabled: true,
             owned_screen: false,
             overlay_input: OverlayInput::Default,
-            selection_clipboard_lease: None,
+            clipboard: Default::default(),
             _stderr_guard: stderr_guard,
         }
     }

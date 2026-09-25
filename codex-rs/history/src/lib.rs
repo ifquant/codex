@@ -1,5 +1,15 @@
 //! Model-history and persisted-rollout domain types.
 
+mod heartbeat;
+pub use heartbeat::HEARTBEAT_CONTENT_KIND;
+pub use heartbeat::Heartbeat;
+pub use heartbeat::UserInputOrigin;
+
+mod compaction_resume_metadata;
+pub use compaction_resume_metadata::CompactionResumeMetadata;
+pub use compaction_resume_metadata::PreviousTurnSettings;
+pub use compaction_resume_metadata::resume_multi_agent_version;
+
 mod compaction_checkpoint;
 pub use compaction_checkpoint::CompactionCheckpoint;
 
@@ -77,11 +87,17 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_model_hash: Option<String>,
 
-    /// Thread acceptance order, independent of when queued user input reaches model history.
+    /// User acceptance or assistant delivery order, independent of queued input recording.
+    /// The serialized name is retained for compatibility with saved history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_order: Option<u64>,
 
-    /// Copied parent context stays model-visible but must not become child-local authorization.
+    /// Output generated for compaction is not an original user-visible assistant message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compaction_output: bool,
+
+    /// Copied parent user/assistant context must not become child-local authorization.
+    /// The serialized field name is retained for compatibility with saved history.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
 
@@ -108,6 +124,7 @@ where
     Ok(Some(serde_json::from_value(value).unwrap_or_else(|_| {
         McpAttribution {
             status: McpAttributionStatus::AttributionError,
+            error_reason: None,
             sources: Vec::new(),
         }
     })))
@@ -244,6 +261,9 @@ pub struct CompactedItem {
     /// `thread/resume` can restore token usage totals from this field without scanning arbitrarily
     /// far past the compaction.
     pub latest_token_usage_record: Option<TokenUsageRecord>,
+    /// Resume metadata for values not represented by the companion rollout records.
+    /// Presence distinguishes explicitly persisted values from legacy fallback reconstruction.
+    pub resume_metadata: Option<CompactionResumeMetadata>,
 }
 
 impl Serialize for CompactedItem {
@@ -534,22 +554,7 @@ fn multi_agent_version_from_items(
         _ => None,
     });
 
-    session_meta_version.or_else(|| {
-        items.iter().rev().find_map(|item| match item {
-            RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
-            RolloutItem::SessionMeta(_)
-            | RolloutItem::ResponseItem(_)
-            | RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::Compacted(_)
-            | RolloutItem::TokenUsageRecord(_)
-            | RolloutItem::WorldState(_)
-            | RolloutItem::RetainedContext(_)
-            | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::RealtimeItem(_)
-            | RolloutItem::EventMsg(_) => None,
-        })
-    })
+    session_meta_version.or_else(|| items.iter().rev().find_map(resume_multi_agent_version))
 }
 
 #[cfg(test)]
